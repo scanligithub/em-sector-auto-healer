@@ -1,0 +1,73 @@
+name: AI Auto-Healing Sector Fetcher
+
+on:
+  # 每天北京时间下午 16:30 自动触发 (UTC时间 08:30)
+  schedule:
+    - cron: '30 8 * * *'
+  # 允许手动点击触发，方便测试
+  workflow_dispatch:
+
+# 必须赋予 Actions 写权限，因为我们需要把 AI 更新的规则 commit 回代码库
+permissions:
+  contents: write
+
+jobs:
+  fetch-and-heal:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          # 获取完整历史以便后续可以 push
+          fetch-depth: 0 
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: 'pip'
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Playwright OS Dependencies
+        # ⚠️ 极其关键：Ubuntu Runner 默认缺少 Chrome 运行所需的一些系统级底层库
+        # --with-deps 会自动把这些 Linux 依赖装好，否则 Brain Engine 会启动失败
+        run: |
+          playwright install chromium --with-deps
+
+      - name: Execute Main Engine (Probe -> Heal -> Fetch)
+        env:
+          # 将 GitHub Secrets 映射到环境变量，供 Python 读取
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL_NAME: ${{ secrets.LLM_MODEL_NAME }}
+          CONCURRENCY: 20
+        run: |
+          python main.py
+
+      - name: Upload Fetched Data Artifact
+        # 将拉取到的 Parquet 数据存为 Artifacts 供下载或其他 Action 调用
+        uses: actions/upload-artifact@v4
+        with:
+          name: sector-klines-data
+          path: data/*.parquet
+          retention-days: 3
+
+      - name: Auto-Commit Healed Rules (The Memory Loop)
+        # 这一步是自愈架构的核心：如果 AI 修改了 active_rules.json，就把它保存到代码库
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          # 检查 config/active_rules.json 是否发生了变更
+          if [[ -n $(git status --porcelain config/active_rules.json) ]]; then
+            echo "⚡ AI Brain Engine updated the rules! Committing back to repository..."
+            git add config/active_rules.json
+            git commit -m "🤖 AI Auto-Healed: Update EastMoney API rules & token [skip ci]"
+            git push
+          else
+            echo "✅ Current rules are still valid. No AI intervention was needed."
+          fi
