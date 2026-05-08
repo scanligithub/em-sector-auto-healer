@@ -1,119 +1,137 @@
-import os
 import json
-import re
+import os
 import asyncio
+import polars as pl
 from loguru import logger
-from playwright.async_api import async_playwright
-from openai import AsyncOpenAI
-from urllib.parse import urlparse, parse_qs
+from curl_cffi.requests import AsyncSession
 
-class BrainEngine:
+class MuscleEngine:
     def __init__(self):
-        # 1. 获取并清洗 API KEY
-        api_key = os.getenv("LLM_API_KEY", "").strip()
-        if not api_key:
-            logger.critical("❌ 致命错误：未找到 LLM_API_KEY！")
-            raise ValueError("Missing LLM_API_KEY")
-            
-        # 2. 获取并清洗 BASE URL
-        base_url = os.getenv("LLM_BASE_URL", "").strip() or "https://integrate.api.nvidia.com/v1"
-        if not base_url.startswith("http"):
-            base_url = f"https://{base_url}"
-
-        # 3. 获取并清洗模型名称
-        model_name = os.getenv("LLM_MODEL_NAME", "").strip() or "openai/gpt-oss-120b"
-
-        self.model_name = model_name
-        self.llm_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-
-    async def _capture_real_traffic(self) -> str:
-        logger.info("🧠 [Brain Engine] 正在启动隐身浏览器进行流量嗅探...")
-        target_url = None
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
-            context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
-            page = await context.new_page()
-
-            async def handle_request(route, request):
-                nonlocal target_url
-                if "api/qt/stock/kline/get" in request.url:
-                    target_url = request.url
-                await route.continue_()
-
-            await page.route("**/*", handle_request)
-            try:
-                # 访问东财详情页触发请求
-                await page.goto("https://quote.eastmoney.com/bk/90.BK0896.html", timeout=20000)
-                await page.wait_for_timeout(5000)
-            except Exception as e:
-                logger.warning(f"🧠 [Brain Engine] 嗅探提示: {e}")
-            finally:
-                await browser.close()
+        self.rules = self._load_rules()
+        self.impersonate = "chrome120" 
+        self.concurrency = int(os.getenv("CONCURRENCY", 20))
         
-        if target_url:
-            logger.success(f"🧠 [Brain Engine] 成功截获请求 URL")
-        return target_url
-
-    def _clean_json_response(self, raw_str: str) -> dict:
-        # 提取 JSON 的鲁棒正则
-        match = re.search(r'\{.*\}', raw_str, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except:
-                pass
-        return {}
-
-    async def _extract_rules_via_llm(self, raw_url: str) -> dict:
-        logger.info(f"🧠 [Brain Engine] 正在通过模型 [{self.model_name}] 逆向参数...")
-        
-        # 更加明确的指令，防止 AI 返回空值
-        prompt = f"""
-        你是一个API分析专家。请从下面的 URL 中提取 API 参数。
-        URL: {raw_url}
-        
-        请提取以下字段：ut, fltt, invt, klt, fqt。
-        要求：
-        1. 如果 URL 中包含该字段，请提取其实际值。
-        2. 如果 URL 中不包含某个字段，请返回该字段的默认值：fltt=2, invt=2, klt=101, fqt=0。
-        3. 严禁返回 null 或 None。
-        
-        请直接返回纯 JSON 对象。
-        """
+    def _load_rules(self):
+        rule_path = "config/active_rules.json"
+        if not os.path.exists(rule_path):
+            logger.info("💪 [Muscle Engine] 配置文件不存在，准备进入自愈模式。")
+            return {}
         
         try:
-            response = await self.llm_client.chat.completions.create(
-                model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1
-            )
-            raw_output = response.choices[0].message.content
-            ai_rules = self._clean_json_response(raw_output)
-            
-            # --- 工业级兜底保护 ---
-            # 即使 AI 抽风返回了 None，我们也强制补全
-            defaults = {
-                "ut": ai_rules.get("ut") or "fa5fd1943c7b386f172d6893dbfba10b", # 兜底用你刚抓到的有效Token
-                "fltt": "2",
-                "invt": "2",
-                "klt": "101",
-                "fqt": "0"
-            }
-            # 合并 AI 结果与默认值
-            final_rules = {k: str(ai_rules.get(k) or v) for k, v in defaults.items()}
-            
-            logger.success(f"🧠 [Brain Engine] 最终生成的规则: {final_rules}")
-            return final_rules
+            with open(rule_path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if not content:
+                    return {}
+                return json.loads(content)
         except Exception as e:
-            logger.error(f"❌ 调用 AI 失败: {str(e)}")
-            raise e
+            logger.warning(f"💪 [Muscle Engine] 配置文件解析失败({e})，强制触发自愈。")
+            # 如果文件坏了，尝试删除它
+            try: os.remove(rule_path)
+            except: pass
+            return {}
+            
+    def reload_rules(self):
+        self.rules = self._load_rules()
 
-    async def heal(self):
-        raw_url = await self._capture_real_traffic()
-        if not raw_url:
-            raise Exception("无法截获真实请求")
-        new_rules = await self._extract_rules_via_llm(raw_url)
-        os.makedirs("config", exist_ok=True)
-        with open("config/active_rules.json", "w", encoding="utf-8") as f:
-            json.dump(new_rules, f, indent=4)
-        logger.info("🧠 [Brain Engine] 自愈完成，规则已保存。")
+    async def probe(self) -> bool:
+        """探针：验证板块数据提取权限"""
+        if not self.rules or "ut" not in self.rules:
+            logger.warning("💪 [Muscle Engine] 内存中无有效规则，探针直接判定失效。")
+            return False
+
+        logger.info("💪 [Muscle Engine] 正在发射探针，验证板块数据提取权限...")
+        try:
+            async with AsyncSession(impersonate=self.impersonate) as session:
+                params = {
+                    "secid": "90.BK0896", 
+                    "fields1": "f1,f2,f3,f4,f5,f6",
+                    "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+                    "beg": "20230101",
+                    "end": "20500101",
+                    "lmt": "10",
+                    **self.rules
+                }
+                resp = await session.get("https://push2.eastmoney.com/api/qt/stock/kline/get", params=params, timeout=10)
+                data = resp.json()
+                
+                if data.get("rc") == 0 and data.get("data") and data["data"].get("klines"):
+                    logger.success("💪 [Muscle Engine] 探针返回正常，规则有效！")
+                    return True
+                else:
+                    logger.warning("💪 [Muscle Engine] 探针检测到规则已失效。")
+                    return False
+        except Exception as e:
+            logger.error(f"💪 [Muscle Engine] 探针网络异常: {e}")
+            return False
+
+    async def fetch_dynamic_sector_list(self) -> list:
+        logger.info("💪 [Muscle Engine] 正在动态扫描全市场板块目录...")
+        sector_list = []
+        targets = ["m:90+t:2", "m:90+t:3", "m:90+t:1"] 
+        try:
+            async with AsyncSession(impersonate=self.impersonate) as session:
+                for fs in targets:
+                    params = {
+                        "pn": 1, "pz": 2000, "po": 1, "np": 1,
+                        "fltt": 2, "invt": 2, "fid": "f3",
+                        "fs": fs, "fields": "f12,f13,f14",
+                        **self.rules
+                    }
+                    resp = await session.get("https://push2.eastmoney.com/api/qt/clist/get", params=params, timeout=15)
+                    data = resp.json()
+                    if data.get("data") and data["data"].get("diff"):
+                        items = data["data"]["diff"]
+                        item_list = list(items.values()) if isinstance(items, dict) else items
+                        for item in item_list:
+                            code = item.get("f12")
+                            if code: sector_list.append(f"90.{code}")
+        except Exception as e:
+            logger.error(f"💪 [Muscle Engine] 目录获取异常: {e}")
+        sector_list = list(set(sector_list))
+        logger.success(f"💪 [Muscle Engine] 共发现 {len(sector_list)} 个板块。")
+        return sector_list
+
+    async def _fetch_single_sector(self, session, secid, semaphore):
+        async with semaphore:
+            params = {
+                "secid": secid,
+                "fields1": "f1,f2,f3,f4,f5,f6",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+                "beg": "19900101",
+                "end": "20500101",
+                "lmt": "100000",
+                **self.rules
+            }
+            try:
+                resp = await session.get("https://push2.eastmoney.com/api/qt/stock/kline/get", params=params, timeout=15)
+                data = resp.json()
+                if data.get("data") and data["data"].get("klines"):
+                    rows = [k.split(",") for k in data["data"]["klines"]]
+                    return {"secid": secid, "klines": rows}
+            except:
+                pass
+            return {"secid": secid, "klines": []}
+
+    async def fetch_all_sectors(self, sector_list: list):
+        if not sector_list: return
+        logger.info(f"💪 [Muscle Engine] 引擎拉取启动，并发: {self.concurrency}")
+        semaphore = asyncio.Semaphore(self.concurrency)
+        results = []
+        async with AsyncSession(impersonate=self.impersonate, max_clients=self.concurrency) as session:
+            tasks = [self._fetch_single_sector(session, secid, semaphore) for secid in sector_list]
+            for coro in asyncio.as_completed(tasks):
+                res = await coro
+                if res["klines"]:
+                    results.extend([{
+                        "secid": res["secid"], "date": r[0], "open": r[1], "close": r[2], 
+                        "high": r[3], "low": r[4], "vol": r[5], "amount": r[6]
+                    } for r in res["klines"]])
+        if results:
+            os.makedirs("data", exist_ok=True)
+            df = pl.DataFrame(results).with_columns([
+                pl.col("open").cast(pl.Float32), pl.col("close").cast(pl.Float32),
+                pl.col("high").cast(pl.Float32), pl.col("low").cast(pl.Float32),
+                pl.col("vol").cast(pl.Float64), pl.col("amount").cast(pl.Float64)
+            ])
+            df.write_parquet("data/sector_klines_full.parquet")
+            logger.success(f"💾 数据抓取完成，存入 {len(results)} 行数据。")
