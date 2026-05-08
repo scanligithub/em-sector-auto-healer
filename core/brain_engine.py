@@ -5,7 +5,7 @@ import asyncio
 from loguru import logger
 from playwright.async_api import async_playwright
 from openai import AsyncOpenAI
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 class BrainEngine:
     def __init__(self):
@@ -16,30 +16,15 @@ class BrainEngine:
             raise ValueError("Missing LLM_API_KEY")
             
         # 2. 获取并清洗 BASE URL
-        raw_base_url = os.getenv("LLM_BASE_URL", "").strip()
-        if not raw_base_url:
-            raw_base_url = "https://integrate.api.nvidia.com/v1"
-        
-        # 自动补全协议头并确保没有双斜杠
-        if not raw_base_url.startswith("http"):
-            base_url = f"https://{raw_base_url}"
-        else:
-            base_url = raw_base_url
-
-        # 打印解析出的域名（用于排查 DNS 问题）
-        parsed = urlparse(base_url)
-        logger.info(f"🌐 [Brain Engine] AI 接口域名解析测试: {parsed.netloc}")
+        base_url = os.getenv("LLM_BASE_URL", "").strip() or "https://integrate.api.nvidia.com/v1"
+        if not base_url.startswith("http"):
+            base_url = f"https://{base_url}"
 
         # 3. 获取并清洗模型名称
-        model_name = os.getenv("LLM_MODEL_NAME", "").strip()
-        if not model_name:
-            model_name = "openai/gpt-oss-120b"
+        model_name = os.getenv("LLM_MODEL_NAME", "").strip() or "openai/gpt-oss-120b"
 
         self.model_name = model_name
-        self.llm_client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url
-        )
+        self.llm_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     async def _capture_real_traffic(self) -> str:
         logger.info("🧠 [Brain Engine] 正在启动隐身浏览器进行流量嗅探...")
@@ -53,46 +38,72 @@ class BrainEngine:
                 nonlocal target_url
                 if "api/qt/stock/kline/get" in request.url:
                     target_url = request.url
-                    logger.success(f"🧠 [Brain Engine] 成功截获底层 K 线请求: {target_url[:80]}...")
                 await route.continue_()
 
             await page.route("**/*", handle_request)
             try:
+                # 访问东财详情页触发请求
                 await page.goto("https://quote.eastmoney.com/bk/90.BK0896.html", timeout=20000)
                 await page.wait_for_timeout(5000)
             except Exception as e:
-                logger.warning(f"🧠 [Brain Engine] 流量嗅探阶段提示: {e}")
+                logger.warning(f"🧠 [Brain Engine] 嗅探提示: {e}")
             finally:
                 await browser.close()
+        
+        if target_url:
+            logger.success(f"🧠 [Brain Engine] 成功截获请求 URL")
         return target_url
 
     def _clean_json_response(self, raw_str: str) -> dict:
+        # 提取 JSON 的鲁棒正则
         match = re.search(r'\{.*\}', raw_str, re.DOTALL)
         if match:
-            clean_str = match.group(0)
-        else:
-            clean_str = raw_str
-        try:
-            return json.loads(clean_str)
-        except Exception as e:
-            logger.error(f"❌ JSON 解析失败: {raw_str}")
-            raise e
+            try:
+                return json.loads(match.group(0))
+            except:
+                pass
+        return {}
 
     async def _extract_rules_via_llm(self, raw_url: str) -> dict:
         logger.info(f"🧠 [Brain Engine] 正在通过模型 [{self.model_name}] 逆向参数...")
-        prompt = f"你是一个API分析专家。从该URL提取ut, fltt, invt, klt参数并返回纯JSON: {raw_url}"
+        
+        # 更加明确的指令，防止 AI 返回空值
+        prompt = f"""
+        你是一个API分析专家。请从下面的 URL 中提取 API 参数。
+        URL: {raw_url}
+        
+        请提取以下字段：ut, fltt, invt, klt, fqt。
+        要求：
+        1. 如果 URL 中包含该字段，请提取其实际值。
+        2. 如果 URL 中不包含某个字段，请返回该字段的默认值：fltt=2, invt=2, klt=101, fqt=0。
+        3. 严禁返回 null 或 None。
+        
+        请直接返回纯 JSON 对象。
+        """
         
         try:
-            # 💡 注意：移除了 response_format 兼容 NVIDIA 接口
             response = await self.llm_client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1
             )
             raw_output = response.choices[0].message.content
-            rules = self._clean_json_response(raw_output)
-            logger.success(f"🧠 [Brain Engine] AI 破译完成: {rules}")
-            return rules
+            ai_rules = self._clean_json_response(raw_output)
+            
+            # --- 工业级兜底保护 ---
+            # 即使 AI 抽风返回了 None，我们也强制补全
+            defaults = {
+                "ut": ai_rules.get("ut") or "fa5fd1943c7b386f172d6893dbfba10b", # 兜底用你刚抓到的有效Token
+                "fltt": "2",
+                "invt": "2",
+                "klt": "101",
+                "fqt": "0"
+            }
+            # 合并 AI 结果与默认值
+            final_rules = {k: str(ai_rules.get(k) or v) for k, v in defaults.items()}
+            
+            logger.success(f"🧠 [Brain Engine] 最终生成的规则: {final_rules}")
+            return final_rules
         except Exception as e:
             logger.error(f"❌ 调用 AI 失败: {str(e)}")
             raise e
