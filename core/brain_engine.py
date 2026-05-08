@@ -113,7 +113,7 @@ class BrainEngine:
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 # 部分第三方 API 可能不支持 response_format，如果报错可将此行注释掉
-                response_format={"type": "json_object"}, 
+                # response_format={"type": "json_object"}, 
                 temperature=0.1
             )
             
