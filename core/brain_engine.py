@@ -12,7 +12,7 @@ class BrainEngine:
         self.model_name = os.getenv("LLM_MODEL_NAME", "").strip() or "openai/gpt-oss-120b"
 
     async def heal(self):
-        logger.info("🧠 [Brain Engine] 启动环境快照捕获...")
+        logger.info("🧠 [Brain Engine] 正在克隆高信誉度行为指纹...")
         target_url = ""
         captured_headers = {}
 
@@ -25,24 +25,25 @@ class BrainEngine:
                 nonlocal target_url, captured_headers
                 if "api/qt/stock/kline/get" in request.url:
                     target_url = request.url
-                    # 💡 核心：只保留合法的 Header，剔除以 ':' 开头的 H2 伪头部
+                    # 💡 核心：必须剔除所有可能引起连接重置的 Header
+                    forbidden_keys = [':', 'host', 'connection', 'content-length', 'accept-encoding']
                     captured_headers = {
                         k: v for k, v in request.headers.items() 
-                        if not k.startswith(':') and k.lower() not in ['content-length', 'host']
+                        if not any(k.lower().startswith(f) for f in forbidden_keys)
                     }
+                    # 强行指定一个稳定的编码，防止 H2 帧解析错误
+                    captured_headers["Accept-Encoding"] = "gzip, deflate"
 
             page.on("request", handle_request)
             try:
-                # 访问东财详情页
                 await page.goto("https://quote.eastmoney.com/bk/90.BK0896.html", timeout=30000)
                 await page.wait_for_timeout(3000)
             finally:
                 await browser.close()
 
-        if not target_url: raise Exception("嗅探失败")
+        if not target_url: raise Exception("嗅探失败，请检查网络环境")
 
-        # 提取动态参数
-        prompt = f"从该URL提取ut参数并返回JSON: {target_url}"
+        prompt = f"从URL提取ut参数并返回JSON: {target_url}"
         response = await self.llm_client.chat.completions.create(
             model=self.model_name, messages=[{"role": "user", "content": prompt}], temperature=0
         )
@@ -57,4 +58,4 @@ class BrainEngine:
         os.makedirs("config", exist_ok=True)
         with open("config/active_rules.json", "w", encoding="utf-8") as f:
             json.dump(rules, f, indent=4)
-        logger.success("🧠 [Brain Engine] 环境快照克隆并清洗完毕。")
+        logger.success("🧠 [Brain Engine] 行为指纹克隆完毕。")
