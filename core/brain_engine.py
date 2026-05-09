@@ -13,52 +13,48 @@ class BrainEngine:
 
     async def heal(self):
         logger.info("🧠 [Brain Engine] 启动环境快照捕获...")
-        target_url = None
-        target_headers = {}
+        target_url = ""
+        captured_headers = {}
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+            context = await browser.new_context()
             page = await context.new_page()
 
             async def handle_request(request):
-                nonlocal target_url, target_headers
+                nonlocal target_url, captured_headers
                 if "api/qt/stock/kline/get" in request.url:
                     target_url = request.url
-                    target_headers = request.headers # ⬅️ 捕获整套真实 Headers
+                    # 💡 核心：只保留合法的 Header，剔除以 ':' 开头的 H2 伪头部
+                    captured_headers = {
+                        k: v for k, v in request.headers.items() 
+                        if not k.startswith(':') and k.lower() not in ['content-length', 'host']
+                    }
 
             page.on("request", handle_request)
             try:
-                await page.goto("https://quote.eastmoney.com/bk/90.BK0896.html", timeout=30000, wait_until="domcontentloaded")
+                # 访问东财详情页
+                await page.goto("https://quote.eastmoney.com/bk/90.BK0896.html", timeout=30000)
                 await page.wait_for_timeout(3000)
             finally:
                 await browser.close()
 
-        if not target_url: raise Exception("流量嗅探失败")
+        if not target_url: raise Exception("嗅探失败")
 
-        # 让 AI 只负责提取动态参数，Header 我们直接存
-        prompt = f"从该URL提取ut,fltt,invt,klt参数并返回纯JSON: {target_url}"
+        # 提取动态参数
+        prompt = f"从该URL提取ut参数并返回JSON: {target_url}"
         response = await self.llm_client.chat.completions.create(
             model=self.model_name, messages=[{"role": "user", "content": prompt}], temperature=0
         )
-        
-        # 解析 AI 结果
         match = re.search(r'\{.*\}', response.choices[0].message.content, re.DOTALL)
-        ai_params = json.loads(match.group(0)) if match else {}
-        
-        # 组装最终规则包：参数 + 环境快照
+        ut_val = json.loads(match.group(0)).get("ut")
+
         rules = {
-            "params": {
-                "ut": ai_params.get("ut"), "fltt": "2", "invt": "2", "klt": "101", "fqt": "0"
-            },
-            "headers": {
-                "Referer": "https://quote.eastmoney.com/",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                "Cookie": target_headers.get("cookie", "") # ⬅️ 携带真实 Cookie
-            }
+            "params": {"ut": ut_val, "fltt": "2", "invt": "2", "klt": "101", "fqt": "0"},
+            "headers": captured_headers
         }
         
         os.makedirs("config", exist_ok=True)
         with open("config/active_rules.json", "w", encoding="utf-8") as f:
             json.dump(rules, f, indent=4)
-        logger.success("🧠 [Brain Engine] 环境快照克隆成功。")
+        logger.success("🧠 [Brain Engine] 环境快照克隆并清洗完毕。")
