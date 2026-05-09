@@ -1,7 +1,14 @@
 {
-    "ut": "fa5fd1943c7b386f172d6893dbfba10b",
-    "fltt": "2",
-    "invt": "2",
-    "klt": "101",
-    "fqt": "0"
+    "params": {
+        "ut": "fa5fd1943c7b386f172d6893dbfba10b",
+        "fltt": "2",
+        "invt": "2",
+        "klt": "101",
+        "fqt": "0"
+    },
+    "headers": {
+        "Referer": "https://quote.eastmoney.com/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Cookie": ""
+    }
 }
