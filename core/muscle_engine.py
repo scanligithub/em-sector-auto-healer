@@ -1,101 +1,79 @@
-import json, os, asyncio, polars as pl
+import asyncio, json, os, polars as pl
 from loguru import logger
-from curl_cffi.requests import AsyncSession
 
 class MuscleEngine:
-    def __init__(self):
-        self._load_all_config()
-        self.concurrency = int(os.getenv("CONCURRENCY", 20))
-        self.impersonate = "chrome120"
-        self.worker_url = os.getenv("CF_WORKER_URL", "").strip()
+    def __init__(self, brain_page):
+        self.page = brain_page # 借用 Brain 的‘活着的’页面
+        self.ut = None
+        self.concurrency = int(os.getenv("CONCURRENCY", 10)) # 浏览器内并发不宜过高
 
-    def _load_all_config(self):
-        path = "config/active_rules.json"
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                self.params = data.get("params", {})
-                self.headers = data.get("headers", {})
-        else:
-            self.params, self.headers = {}, {}
-
-    def reload_rules(self):
-        self._load_all_config()
-        logger.info("💪 [Muscle Engine] 攻略已重载，准备以新身份作业。")
-
-    async def _request(self, session, url, params, timeout=30):
-        actual_url = url
-        p = {**params}
-        if self.worker_url:
-            p["api_url"] = url 
-            actual_url = self.worker_url
-        try:
-            resp = await session.get(
-                actual_url, params=p, headers=self.headers,
-                impersonate=self.impersonate, timeout=timeout, verify=False
-            )
-            if resp.status_code == 200: return resp.json()
-        except: pass
-        return {}
+    def set_ut(self, ut):
+        self.ut = ut
 
     async def probe(self) -> bool:
-        """行为探针：验证白酒板块的数据提取权限"""
-        if not self.params: return False
-        logger.info("💪 [Muscle Engine] 正在发射探针验证行为指纹有效性...")
-        async with AsyncSession() as s:
-            url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-            p = {"secid": "90.BK0896", "fields2": "f51", "lmt": "1", **self.params}
-            data = await self._request(s, url, p)
-            if data.get("data") and data["data"].get("klines"):
-                logger.success("💪 [Muscle Engine] 行为指纹有效，可以正常抓取。")
+        """原生探针：在浏览器上下文内执行 fetch"""
+        if not self.ut: return False
+        logger.info("💪 [Muscle] 发射浏览器原生探针...")
+        
+        # 💡 核心：在东财页面内部执行 fetch，自动继承所有指纹
+        script = f"""
+        fetch("https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=90.BK0896&fields2=f51&lmt=1&ut={self.ut}")
+        .then(res => res.json())
+        """
+        try:
+            data = await self.page.evaluate(script)
+            if data.get("data"):
+                logger.success("💪 [Muscle] 原生身份验证通过！")
                 return True
-            return False
+        except Exception as e:
+            logger.error(f"💪 [Muscle] 原生探针异常: {e}")
+        return False
 
     async def fetch_dynamic_sector_list(self) -> list:
-        """并行分类扫描：捕获行业、概念、地域"""
-        logger.info("💪 [Muscle Engine] 正在动态扫描全量板块目录...")
-        targets = ["m:90+t:2", "m:90+t:3", "m:90+t:1"]
-        all_codes = []
-        async with AsyncSession() as session:
-            for fs in targets:
-                url = "https://push2.eastmoney.com/api/qt/clist/get"
-                p = {"pn": 1, "pz": 1000, "fs": fs, "fields": "f12", **self.params}
-                res = await self._request(session, url, p)
-                if res.get("data") and res["data"].get("diff"):
-                    diff = res["data"]["diff"]
-                    items = list(diff.values()) if isinstance(diff, dict) else diff
-                    all_codes.extend([f"90.{x['f12']}" for x in items])
-        all_codes = list(set(all_codes))
-        logger.success(f"💪 [Muscle Engine] 扫描完成：捕获 {len(all_codes)} 个板块。")
-        return all_codes
-
-    async def _fetch_single(self, session, secid, semaphore):
-        async with semaphore:
-            url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-            p = {
-                "secid": secid, 
-                "fields1": "f1,f2", 
-                "fields2": "f51,f52,f53,f54,f55,f56", 
-                "beg": "19900101", "end": "20990101", 
-                "lmt": "100000", **self.params
-            }
-            data = await self._request(session, url, p)
-            if data.get("data") and data["data"].get("klines"):
-                return [{"secid": secid, "date": r.split(",")[0], "close": float(r.split(",")[2])} for r in data["data"]["klines"]]
-            return []
+        logger.info("💪 [Muscle] 正在原生扫描板块目录...")
+        # 同样使用 evaluate fetch
+        script = f"""
+        fetch("https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=1500&fs=m:90+t:2,m:90+t:3&fields=f12&ut={self.ut}")
+        .then(res => res.json())
+        """
+        res = await self.page.evaluate(script)
+        codes = [f"90.{x['f12']}" for x in res['data']['diff']]
+        logger.success(f"💪 [Muscle] 扫描完成，捕获 {len(codes)} 个板块。")
+        return codes
 
     async def fetch_all_sectors(self, sector_list: list):
-        if not sector_list: return
-        logger.info(f"💪 [Muscle Engine] 开启并发拉取，并发度: {self.concurrency}")
-        semaphore = asyncio.Semaphore(self.concurrency)
-        all_data = []
-        async with AsyncSession(max_clients=self.concurrency) as session:
-            tasks = [self._fetch_single(session, s, semaphore) for s in sector_list]
-            for coro in asyncio.as_completed(tasks):
-                res = await coro
-                if res: all_data.extend(res)
+        """
+        在浏览器内进行分批次、高信誉度的数据提取
+        """
+        logger.info(f"💪 [Muscle] 正在进行 Browser-Native 并发抓取...")
+        all_results = []
         
-        if all_data:
+        # 分批处理，防止浏览器卡死
+        batch_size = 5 
+        for i in range(0, len(sector_list), batch_size):
+            batch = sector_list[i:i+batch_size]
+            tasks = []
+            for secid in batch:
+                script = f"""
+                fetch("https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields2=f51,f52,f53&lmt=100000&ut={self.ut}")
+                .then(res => res.json())
+                """
+                tasks.append(self.page.evaluate(script))
+            
+            # 并发执行浏览器内的 fetch
+            batch_data = await asyncio.gather(*tasks)
+            
+            for idx, data in enumerate(batch_data):
+                if data.get("data") and data["data"].get("klines"):
+                    secid = batch[idx]
+                    for r in data["data"]["klines"]:
+                        row = r.split(",")
+                        all_results.append({"secid": secid, "date": row[0], "close": float(row[2])})
+            
+            logger.debug(f"📊 已完成 {i + len(batch)} / {len(sector_list)}")
+            await asyncio.sleep(random.uniform(0.5, 1.5)) # 注入人类节律噪声
+
+        if all_results:
             os.makedirs("data", exist_ok=True)
-            pl.DataFrame(all_data).write_parquet("data/sector_klines_full.parquet")
-            logger.success(f"💾 最终落盘 {len(all_data)} 行数据！")
+            pl.DataFrame(all_results).write_parquet("data/sector_klines_full.parquet")
+            logger.success(f"💾 任务圆满完成，最终落盘 {len(all_results)} 行数据！")
