@@ -21,8 +21,10 @@ class BrainEngine:
                 nonlocal stolen_kline_url, stolen_clist_url
                 if "api/qt/stock/kline/get" in request.url and "secid=90.BK0896" in request.url:
                     stolen_kline_url = request.url
-                if "api/qt/clist/get" in request.url and "fs=m:90" in request.url:
-                    stolen_clist_url = request.url
+                # 💡 修复：去掉 "fs=m:90" 的硬性要求，无视 URL 编码 (m%3A90)
+                if "api/qt/clist/get" in request.url:
+                    if not stolen_clist_url: # 只要抓到一个就行
+                        stolen_clist_url = request.url
 
             page.on("request", on_request)
 
