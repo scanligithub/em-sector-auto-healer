@@ -5,32 +5,28 @@ from core.brain_engine import BrainEngine
 from core.muscle_engine import MuscleEngine
 
 async def main():
-    logger.info("🚀 [System] 终极形态：混合原生引擎启动 (Traffic Hijack + Browser API)")
+    logger.info("🚀 [System] 终极形态：纯被动流量劫持系统 (Passive Traffic Hijacker)")
     
     brain = BrainEngine()
     try:
-        # 1. 构建无懈可击的浏览器上下文 (登录态、Cookie、指纹)
-        context, _ = await brain.build_trust_context()
+        # 1. 构建无懈可击的浏览器上下文
+        context = await brain.build_trust_context()
         
-        # 2. 移交环境给肌肉引擎
+        # 2. 移交环境给监听引擎
         muscle = MuscleEngine(context)
         
-        # 3. 拉取最新的全量目录
+        # 3. 真实 Tab 导航获取目录 (彻底摆脱 APIRequestContext 的 Timeout 黑洞)
         dynamic_sectors = await muscle.fetch_dynamic_sector_list()
         
         if dynamic_sectors:
-            logger.info(f"🟢 [System] 准备对 {len(dynamic_sectors)} 个板块执行数据清洗...")
-            
-            # 4. 执行单点劫持，获取今天的官方合法链接
-            await muscle.prepare_hijack_template()
-            
-            # 5. 执行极速拉取
-            await muscle.fetch_all_sectors(dynamic_sectors)
+            logger.info(f"🟢 [System] 准备对 {len(dynamic_sectors)} 个板块执行物理级流量监听...")
+            # 4. 执行全量监听
+            await muscle.hijack_all_sectors(dynamic_sectors)
         else:
             logger.error("❌ [System] 目录扫描失败，任务终止。")
             
     except Exception as e:
-        logger.exception(f"🔥 [System] 系统异常: {e}")
+        logger.exception(f"🔥 [System] 系统严重异常: {e}")
     finally:
         await brain.close()
         logger.info("🛑 [System] 浏览器母体已安全销毁。")
