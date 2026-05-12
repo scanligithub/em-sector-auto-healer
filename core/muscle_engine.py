@@ -58,16 +58,23 @@ class MuscleEngine:
         return {}
 
     async def fetch_dynamic_sector_list(self) -> list:
-        logger.info("💪 [Muscle] 正在使用官方合法 Clist 凭证拉取全市场目录...")
+        logger.info("💪 [Muscle] 正在使用官方合法凭证拉取全市场目录...")
         
-        # 💡 核心修复 4：不再自己构造 URL，复用偷来的 Clist URL，只替换条数限制
         target_url = self.clist_template
+        
+        # 💡 终极防弹机制：如果雷达真的漏掉了 clist，直接从 kline 里扣出 ut 来继承！
         if not target_url:
-            raise Exception("Brain 引擎未能提供 clist 模板")
-            
-        # 狸猫换太子：扩大拉取条数，并强制拉取三大板块
-        target_url = re.sub(r'pz=\d+', 'pz=2000', target_url)
-        target_url = re.sub(r'fs=[^&]+', 'fs=m:90+t:2,m:90+t:3,m:90+t:1', target_url)
+            logger.warning("⚠️ 未能继承 clist 模板，正在使用 kline 签名进行原生构造...")
+            ut_match = re.search(r'ut=([^&]+)', self.kline_template)
+            ut = ut_match.group(1) if ut_match else "fa5fd1943c7b386f172d6893dbfba10b"
+            target_url = (
+                f"https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=2000&po=1&np=1"
+                f"&fltt=2&invt=2&fid=f3&fs=m:90+t:2,m:90+t:3,m:90+t:1&fields=f12&ut={ut}"
+            )
+        else:
+            # 狸猫换太子：扩大拉取条数，并强制拉取三大板块
+            target_url = re.sub(r'pz=\d+', 'pz=2000', target_url)
+            target_url = re.sub(r'fs=[^&]+', 'fs=m:90+t:2,m:90+t:3,m:90+t:1', target_url)
         
         async with AsyncSession(impersonate=self.impersonate) as session:
             data = await self._safe_request(session, target_url)
