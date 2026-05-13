@@ -19,8 +19,15 @@ class MuscleEngine:
     def __init__(self, trust_context: dict):
         self.kline_template = trust_context.get("kline_url", "")
         self.clist_template = trust_context.get("clist_url", "")
+        
+        # 💡 极其严格的 Worker 域名解析与防空判断
         raw_worker = os.getenv("CF_WORKER_URL", "").strip()
-        self.worker_url = raw_worker if raw_worker.startswith("http") else f"https://{raw_worker}"
+        if raw_worker and raw_worker.lower() not in ["none", "null"]:
+            self.worker_url = raw_worker if raw_worker.startswith("http") else f"https://{raw_worker}"
+            logger.info(f"🛡️ [Proxy] 检测到 CF Worker 节点: {self.worker_url}")
+        else:
+            self.worker_url = ""
+            logger.warning("⚠️ [Proxy] 未配置 CF_WORKER_URL，将使用本机 IP 直连（高危）")
         
         self.headers = {
             "User-Agent": trust_context.get("ua", ""),
