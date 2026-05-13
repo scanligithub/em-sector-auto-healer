@@ -1,38 +1,32 @@
 import asyncio
 import sys
+import os
 from loguru import logger
 from core.muscle_engine import MuscleEngine
+from dotenv import load_dotenv
+
+load_dotenv()
 
 async def main():
-    logger.info("🚀 [System] Zero-DOM 极速纯享版引擎启动 | 纯 curl_cffi + CF Worker 驱动")
+    logger.info("🔥 [System] 工业级板块数据中台启动 | Scrapling + WorkerPool + DuckDB")
     
-    try:
-        # 直接实例化 MuscleEngine，彻底抛弃 BrainEngine 和前置信任链窃取
-        muscle = MuscleEngine()
+    engine = MuscleEngine()
+    
+    # 0. 构建信任链 (仅执行一次，建立 Browser Session 态)
+    await engine.build_trust_chain()
+    
+    # 1. 扫描活跃板块 (高韧性分布式扫描)
+    sector_list = await engine.fetch_dynamic_sector_list()
+    
+    if sector_list:
+        # 2. 增量拉取数据 (池化路由 + 增量识别)
+        await engine.fetch_all_sectors(sector_list)
         
-        # 0. 启动时检查 Worker 健康状态
-        logger.info("💚 [System] 正在检查 CF Worker 健康状态...")
-        health = await muscle.check_worker_health()
-        if health:
-            logger.info(f"💚 [System] Worker 状态正常 | 版本: {health.get('worker_version', 'N/A')} | 总请求: {health.get('total_requests', 0)} | 错误数: {health.get('error_count', 0)}")
-        else:
-            logger.warning("⚠️ [System] Worker 健康检查未通过，将继续尝试运行但可能失败")
-        
-        # 1. 扫描目录 (动态分页 + 静态兜底)
-        dynamic_sectors = await muscle.fetch_dynamic_sector_list()
-        
-        if dynamic_sectors:
-            logger.info(f"🟢 [System] 目标确认: {len(dynamic_sectors)} 个板块，开始执行高并发压制...")
-            # 2. 并发抓取并落盘
-            await muscle.fetch_all_sectors(dynamic_sectors)
-            
-            # 3. 输出 Worker 错误统计摘要
-            logger.info(muscle.get_worker_error_summary())
-        else:
-            logger.error("❌ [System] 目录扫描与兜底全线失败，任务终止。")
-            
-    except Exception as e:
-        logger.exception(f"🔥 [System] 系统严重异常: {e}")
+        # 3. 输出汇总
+        err_rate = (engine.stats['errors'] / engine.stats['total'] * 100) if engine.stats['total'] > 0 else 0
+        logger.info(f"📊 任务统计: 总请求 {engine.stats['total']} | 错误率 {err_rate:.1f}% | 状态码分布: {engine.stats['codes']}")
+    else:
+        logger.error("❌ 目录扫描全线失败，任务终止")
 
 if __name__ == "__main__":
     if sys.platform == 'win32':
