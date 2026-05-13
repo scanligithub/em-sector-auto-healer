@@ -7,24 +7,27 @@ from dotenv import load_dotenv
 load_dotenv()
 
 async def main():
-    logger.info("🏢 [Quant DB v3] 工业级板块数据中台")
+    logger.info("🏢 [Quant DB v3] 工业级板块数据中台启动")
     engine = MuscleEngine()
     
     # 0. 认证
     await engine.build_trust_chain()
     
-    # 1. 名录管理 (周日执行 Full Reconcile)
+    # 1. 名录管理 (周日执行全量校对)
     is_sunday = datetime.now().weekday() == 6
     sector_list = await engine.get_active_sectors(force_reconcile=is_sunday)
     
-    # 2. 增量同步
+    # 2. 同步与审计报告
     if sector_list:
         await engine.sync_all_klines(sector_list)
         
-        # 3. 汇总报告
+        # 3. 错误统计汇总
         total = engine.stats['total']
         if total > 0:
-            logger.info(f"📊 运行报告: 请求 {total} | 错误率 {(engine.stats['errors']/total)*100:.1f}%")
+            err_rate = (engine.stats['errors'] / total * 100)
+            logger.info(f"📊 流量统计: 总请求 {total} | 失败率 {err_rate:.1f}% | 状态码分布: {engine.stats['codes']}")
+    else:
+        logger.error("❌ 未能获取有效板块名录")
 
 if __name__ == "__main__":
     asyncio.run(main())
