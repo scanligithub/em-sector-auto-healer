@@ -11,11 +11,13 @@ from curl_cffi.requests import AsyncSession
 from playwright.async_api import async_playwright
 
 class MuscleEngine:
+    # 💡 静态核心兜底库：防断流最后防线
     FALLBACK_SECTORS = [
         "90.BK0896", "90.BK1036", "90.BK0475", "90.BK0733", "90.BK0427",
         "90.BK1027", "90.BK0477", "90.BK0474", "90.BK0456", "90.BK0480"
     ]
     
+    # 东财官方通用鉴权 Token
     UT = "fa5fd1943c7b386f172d6893dbfba10b"
 
     def __init__(self):
@@ -29,12 +31,10 @@ class MuscleEngine:
             "Accept-Encoding": "gzip, deflate",
             "Connection": "keep-alive"
         }
-        
         self.concurrency = int(os.getenv("CONCURRENCY", 10))
         self.impersonate = "chrome124"
 
     # --- 阶段一：Playwright 幽灵扫描 (高容错版) ---
-    
     async def fetch_dynamic_sector_list(self) -> list:
         logger.info("🧠 [Phase 1] 启动 Playwright 目录扫描 (强化容错版)...")
         all_codes = set()
@@ -50,7 +50,7 @@ class MuscleEngine:
                     logger.info(f"➡️ 开始渗透分类: {cat_name}")
                     fail_count = 0  # 连续失败计数
                     
-                    for pn in range(1, 25): 
+                    for pn in range(1, 25):
                         target_url = (
                             f"https://push2.eastmoney.com/api/qt/clist/get?pn={pn}&pz=50&po=1&np=1"
                             f"&fltt=2&invt=2&fid=f3&fs={urllib.parse.quote(fs_param)}&fields=f12&ut={self.UT}"
@@ -65,35 +65,41 @@ class MuscleEngine:
                             data = self._extract_json(content)
                             if data and data.get("data") and data["data"].get("diff"):
                                 diff = data["data"]["diff"]
-                                for x in diff: all_codes.add(f"90.{x['f12']}")
-                                fail_count = 0 # 重置失败计数
-                                if len(diff) < 50: break
+                                for x in diff:
+                                    all_codes.add(f"90.{x['f12']}")
+                                fail_count = 0  # 重置失败计数
+                                if len(diff) < 50:
+                                    break
                             else:
                                 fail_count += 1
                                 logger.warning(f"⚠️ {cat_name} 第 {pn} 页数据为空或格式不对 [{fail_count}/3]")
-                                if fail_count >= 3: break # 连续 3 页没数据才判定结束
+                                if fail_count >= 3:
+                                    break  # 连续 3 页没数据才判定结束
                         except Exception as e:
                             logger.error(f"🕒 Playwright 网络异常 {cat_name} P{pn}: {str(e).splitlines()[0]}")
                             fail_count += 1
-                            if fail_count >= 3: break
+                            if fail_count >= 3:
+                                break
             finally:
                 await browser.close()
 
         if not all_codes:
             logger.warning("⚠️ 扫描全线失败，启用静态库。")
             return self.FALLBACK_SECTORS
-            
+
         logger.success(f"🧠 [Phase 1] 渗透成功！实际共捕获 {len(all_codes)} 个原始板块 ID。")
         return list(all_codes)
 
     # --- 阶段二：curl_cffi 并发抓取 ---
-
     def _extract_json(self, text: str) -> dict:
-        if not text: return {}
+        if not text:
+            return {}
         # 兼容 JSONP 剥壳
         match = re.search(r'^[^(]*\(\s*(\{.*\})\s*\)\s*;?\s*$', text, re.DOTALL)
-        try: return json.loads(match.group(1) if match else text)
-        except: return {}
+        try:
+            return json.loads(match.group(1) if match else text)
+        except:
+            return {}
 
     def _route_url(self, target_url: str) -> str:
         # 注入 Cache-Buster 确保命中 Worker 统计
@@ -106,7 +112,6 @@ class MuscleEngine:
         async with semaphore:
             # 流量平滑抖动
             await asyncio.sleep(random.uniform(0.1, 1.5))
-            
             target_url = (
                 f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}"
                 f"&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
@@ -126,12 +131,17 @@ class MuscleEngine:
                                 row = r.split(",")
                                 try:
                                     res.append({
-                                        "secid": secid, "date": row[0], 
-                                        "open": float(row[1]), "close": float(row[2]), 
-                                        "high": float(row[3]), "low": float(row[4]), 
-                                        "volume": float(row[5]), "amount": float(row[6])
+                                        "secid": secid,
+                                        "date": row[0],
+                                        "open": float(row[1]),
+                                        "close": float(row[2]),
+                                        "high": float(row[3]),
+                                        "low": float(row[4]),
+                                        "volume": float(row[5]),
+                                        "amount": float(row[6])
                                     })
-                                except: continue
+                                except:
+                                    continue
                             return res
                     await asyncio.sleep(2 ** attempt)
                 except Exception:
@@ -152,16 +162,16 @@ class MuscleEngine:
             
             for coro in asyncio.as_completed(tasks):
                 res = await coro
-                if res: 
+                if res:
                     all_results.extend(res)
                 if len(all_results) > 0 and len(all_results) % 200000 == 0:
                     logger.info(f"📊 已拉取 {len(all_results)} 条 K 线数据切片...")
-        
+
         if all_results:
             os.makedirs("data", exist_ok=True)
             # 💡 修正点：将 zstandard 修改为 polars 识别的 zstd
             pl.DataFrame(all_results).write_parquet(
-                "data/sector_klines_full.parquet", 
+                "data/sector_klines_full.parquet",
                 compression="zstd"
             )
             logger.success(f"💾 工业级作业完成！最终落盘 {len(all_results)} 行数据。")
