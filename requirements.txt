@@ -1,5 +1,5 @@
+scrapling>=0.3.15
 playwright>=1.42.0
-scrapling>=0.1.18
 curl_cffi>=0.7.0
 polars>=0.20.0
 duckdb>=0.10.0
