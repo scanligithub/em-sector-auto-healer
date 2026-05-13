@@ -26,25 +26,27 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install -r requirements.txt
-          playwright install chromium --with-deps
+          # 💡 关键修改：安装 scrapling 所需的底层浏览器引擎及系统依赖
+          python -m scrapling install
 
       - name: Run Engine
         env:
-          CONCURRENCY: 10  # 💡 建议测试阶段降到 10，保护 Worker
-          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
+          CONCURRENCY: 15
+          # 💡 确保你在 GitHub Secrets 中配置了 CF_WORKER_URLS (多个用逗号隔开)
+          CF_WORKER_URLS: ${{ secrets.CF_WORKER_URLS }}
+          DATA_PATH: "data/sector_klines_full.parquet"
         run: python main.py
 
-      - name: Auto-Commit If Rules Changed
+      - name: Auto-Commit If Data Updated
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          if [[ -n $(git status --porcelain config/active_rules.json) ]]; then
-            git add config/active_rules.json
-            git commit -m "🤖 AI Auto-Healed: Update EM rules via Browser Navigation"
-            git push
-          fi
+          # 如果有数据更新则提交（可选，如果数据太大建议只传 Artifact）
+          git add data/*.parquet || true
+          git commit -m "🤖 Data Update: Sector Klines Incremental" || true
+          git push || true
 
-      - name: Upload Data
+      - name: Upload Data Artifact
         uses: actions/upload-artifact@v4
         with:
           name: sector-data
