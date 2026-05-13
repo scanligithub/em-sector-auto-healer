@@ -1,5 +1,5 @@
 import asyncio
-import sys
+from datetime import datetime
 from loguru import logger
 from core.muscle_engine import MuscleEngine
 from dotenv import load_dotenv
@@ -7,28 +7,24 @@ from dotenv import load_dotenv
 load_dotenv()
 
 async def main():
-    logger.info("🚀 [System] 工业级 EM 数据中台 | 增量/池化/Stealth 模式")
-    
+    logger.info("🏢 [Quant DB v3] 工业级板块数据中台")
     engine = MuscleEngine()
     
-    # 0. 获取认证指纹
+    # 0. 认证
     await engine.build_trust_chain()
     
-    # 1. 扫描板块目录
-    sector_list = await engine.fetch_dynamic_sector_list()
+    # 1. 名录管理 (周日执行 Full Reconcile)
+    is_sunday = datetime.now().weekday() == 6
+    sector_list = await engine.get_active_sectors(force_reconcile=is_sunday)
     
+    # 2. 增量同步
     if sector_list:
-        # 2. 增量抓取 K 线
-        await engine.fetch_all_sectors(sector_list)
+        await engine.sync_all_klines(sector_list)
         
-        # 3. 统计结果
-        if engine.stats['total'] > 0:
-            err_rate = (engine.stats['errors'] / engine.stats['total'] * 100)
-            logger.info(f"📊 执行摘要: 总请求 {engine.stats['total']} | 错误率 {err_rate:.1f}%")
-    else:
-        logger.error("❌ 板块目录获取失败，请检查 Worker 状态或东财接口。")
+        # 3. 汇总报告
+        total = engine.stats['total']
+        if total > 0:
+            logger.info(f"📊 运行报告: 请求 {total} | 错误率 {(engine.stats['errors']/total)*100:.1f}%")
 
 if __name__ == "__main__":
-    if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())
