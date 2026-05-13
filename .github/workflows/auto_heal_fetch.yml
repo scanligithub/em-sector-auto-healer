@@ -31,11 +31,16 @@ jobs:
 
       - name: Run Engine
         env:
-          CONCURRENCY: 15
-          # 💡 确保你在 GitHub Secrets 中配置了 CF_WORKER_URLS (多个用逗号隔开)
-          CF_WORKER_URLS: ${{ secrets.CF_WORKER_URL }}
-          DATA_PATH: "data/sector_klines_full.parquet"
+          CONCURRENCY: 8 # 💡 稳健起见调低至 8
+          # 💡 确保 GitHub Secret 名字为 CF_WORKER_URLS
+          CF_WORKER_URLS: ${{ secrets.CF_WORKER_URLS }}
         run: python main.py
+
+      - name: Upload DB Artifact # 💡 现在主存是 DB
+        uses: upload-artifact@v4
+        with:
+          name: sector-warehouse
+          path: data/sector_quant.db
 
       - name: Auto-Commit If Data Updated
         run: |
