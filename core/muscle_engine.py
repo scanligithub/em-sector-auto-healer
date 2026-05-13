@@ -80,9 +80,13 @@ class MuscleEngine:
             logger.error(f"⚠️ 信任链构建异常: {e} (系统将尝试直连运行)")
 
     def _run_scrapling(self):
-        """适配 Scrapling v0.3.x+ 最新 API"""
+        """
+        适配 Scrapling v0.3.x+ 最新 API。
+        不再传递 auto_match，避免触发底层的解析器错误。
+        """
+        # 默认情况下 Fetcher 就会处理基本的指纹
         fetcher = Fetcher()
-        fetcher.configure(auto_match=True) # 解决 deprecated 警告
+        # 仅调用不带参数的 configure() 满足库的警告建议，或者干脆不调
         return fetcher.get("https://quote.eastmoney.com/center/hsbk.html")
 
     def _route_url(self, target_url: str, use_cache: bool = False) -> str:
