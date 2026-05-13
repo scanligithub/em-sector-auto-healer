@@ -29,11 +29,8 @@ jobs:
 
       - name: Run Engine
         env:
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
-          LLM_MODEL_NAME: ${{ secrets.LLM_MODEL_NAME }}
           CONCURRENCY: 10  # 💡 建议测试阶段降到 10，保护 Worker
-          CF_WORKER_URL: "setor.scanliworkersdev.workers.dev" # 💡 补上你的 Worker 域名！
+          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
         run: python main.py
 
       - name: Auto-Commit If Rules Changed
