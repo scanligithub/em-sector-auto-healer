@@ -1,5 +1,6 @@
+scrapling>=0.1.18
 curl_cffi>=0.7.0
-playwright>=1.42.0
 polars>=0.20.0
+duckdb>=0.10.0
 loguru>=0.7.2
 python-dotenv>=1.0.1
