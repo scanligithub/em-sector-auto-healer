@@ -33,7 +33,7 @@ jobs:
         env:
           CONCURRENCY: 15
           # 💡 确保你在 GitHub Secrets 中配置了 CF_WORKER_URLS (多个用逗号隔开)
-          CF_WORKER_URLS: ${{ secrets.CF_WORKER_URLS }}
+          CF_WORKER_URLS: ${{ secrets.CF_WORKER_URL }}
           DATA_PATH: "data/sector_klines_full.parquet"
         run: python main.py
 
