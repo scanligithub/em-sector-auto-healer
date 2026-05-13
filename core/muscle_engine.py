@@ -87,37 +87,57 @@ class MuscleEngine:
         logger.info("💪 [Muscle] 直连 API：细颗粒度扫描全市场板块目录...")
         all_codes = set()
         
+        async def fetch_dynamic_sector_list(self) -> list:
+        logger.info("💪 [Muscle] 启动目录扫描：按 [地域/行业/概念] 分类独立探测...")
+        all_codes = set()
+        
+        # 💡 与官方网页完全对应的三大分类字典
+        categories = {
+            "地域板块": "m:90+t:1",
+            "行业板块": "m:90+t:2",
+            "概念板块": "m:90+t:3"
+        }
+        
         async with AsyncSession(impersonate=self.impersonate) as session:
-            # 💡 细颗粒度分页：每页 50 个，抓 25 页 (覆盖 1250 个板块)，彻底消除 Timeout
-            for pn in range(1, 26): 
-                fs_param = urllib.parse.quote("m:90+t:2,m:90+t:3")
-                target_url = (
-                    f"https://push2.eastmoney.com/api/qt/clist/get?pn={pn}&pz=50&po=1&np=1"
-                    f"&fltt=2&invt=2&fid=f3&fs={fs_param}&fields=f12&ut={self.UT}"
-                )
+            for cat_name, fs_param in categories.items():
+                logger.info(f"➡️ 开始扫描分类: {cat_name}")
+                encoded_fs = urllib.parse.quote(fs_param)
+                cat_count = 0
                 
-                data = await self._safe_request(session, target_url, f"LIST_P{pn}")
-                
-                # 💡 智能熔断：如果某一页返回的 diff 为空，说明已经到底了，提前退出循环
-                if data and data.get("data") and data["data"].get("diff"):
-                    diff = data["data"]["diff"]
-                    for x in diff:
-                        all_codes.add(f"90.{x['f12']}")
-                    if len(diff) < 50:
-                        logger.debug(f"✅ 第 {pn} 页不满 50 个，已触及列表末尾。")
-                        break
-                else:
-                    logger.debug(f"⚠️ 第 {pn} 页无数据，停止扫描。")
-                    break
+                # 每个分类单独从第 1 页开始翻页，极大地降低了深部分页(pn>10)的触发概率
+                for pn in range(1, 20): 
+                    target_url = (
+                        f"https://push2.eastmoney.com/api/qt/clist/get?pn={pn}&pz=50&po=1&np=1"
+                        f"&fltt=2&invt=2&fid=f3&fs={encoded_fs}&fields=f12&ut={self.UT}"
+                    )
                     
-                # 翻页延迟
-                await asyncio.sleep(0.5)
+                    data = await self._safe_request(session, target_url, f"{cat_name}_P{pn}")
+                    
+                    if data and data.get("data") and data.get("data").get("diff"):
+                        diff = data["data"]["diff"]
+                        for x in diff:
+                            all_codes.add(f"90.{x['f12']}")
+                            cat_count += 1
+                            
+                        # 如果不满 50 个，说明当前分类已经翻到底了，直接进入下一个分类
+                        if len(diff) < 50:
+                            logger.debug(f"✅ {cat_name} 扫描触底结束，共 {pn} 页，捕获 {cat_count} 个。")
+                            break
+                    else:
+                        logger.debug(f"⚠️ {cat_name} 第 {pn} 页无数据，提前结束本分类。")
+                        break
+                        
+                    # 拟人化翻页休眠
+                    await asyncio.sleep(0.5)
+                
+                # 分类切换间的安全休眠
+                await asyncio.sleep(1.0)
 
         if not all_codes:
-            logger.warning("❌ 扫描失败，启用静态核心库兜底！")
+            logger.warning("❌ 目录扫描全线失败，启用静态核心库兜底！")
             return self.FALLBACK_SECTORS
             
-        logger.success(f"💪 [Muscle] 目录扫描完美收官！共捕获 {len(all_codes)} 个唯一板块。")
+        logger.success(f"💪 [Muscle] 三大分类拼图完成！实际合并去重后共捕获 {len(all_codes)} 个唯一板块。")
         return list(all_codes)
 
     async def _fetch_single_sector(self, session, secid: str, semaphore: asyncio.Semaphore):
