@@ -44,7 +44,7 @@ jobs:
           CONCURRENCY: 8  # 工业级稳健并发
           # 💡 请确保在 GitHub Repo -> Settings -> Secrets -> Actions 中配置了此变量
           # 格式示例: worker1.dev,worker2.dev
-          CF_WORKER_URLS: ${{ secrets.CF_WORKER_URLS }}
+          CF_WORKER_URLS: ${{ secrets.CF_WORKER_URL }}
           DATA_PATH: "data/sector_klines_full.parquet"
         run: python main.py
 
