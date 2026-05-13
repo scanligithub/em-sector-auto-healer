@@ -1,23 +1,24 @@
 import asyncio
 import sys
 from loguru import logger
-from core.brain_engine import BrainEngine
 from core.muscle_engine import MuscleEngine
 
 async def main():
-    logger.info("🚀 [System] 终极工业反风控引擎启动 (Exponential Backoff)")
+    logger.info("🚀 [System] Zero-DOM 极速纯享版引擎启动 | 纯 curl_cffi + CF Worker 驱动")
     
-    brain = BrainEngine()
     try:
-        trust_context = await brain.steal_trust_context()
-        muscle = MuscleEngine(trust_context)
+        # 直接实例化 MuscleEngine，彻底抛弃 BrainEngine 和前置信任链窃取
+        muscle = MuscleEngine()
+        
+        # 1. 扫描目录 (动态分页 + 静态兜底)
         dynamic_sectors = await muscle.fetch_dynamic_sector_list()
         
         if dynamic_sectors:
-            logger.info(f"🟢 [System] 对 {len(dynamic_sectors)} 个板块执行工业级并发抓取...")
+            logger.info(f"🟢 [System] 目标确认: {len(dynamic_sectors)} 个板块，开始执行高并发压制...")
+            # 2. 并发抓取并落盘
             await muscle.fetch_all_sectors(dynamic_sectors)
         else:
-            logger.error("❌ [System] 目录扫描失败，任务终止。")
+            logger.error("❌ [System] 目录扫描与兜底全线失败，任务终止。")
             
     except Exception as e:
         logger.exception(f"🔥 [System] 系统严重异常: {e}")
