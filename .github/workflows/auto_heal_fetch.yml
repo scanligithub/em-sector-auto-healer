@@ -1,9 +1,9 @@
-name: AI Auto-Healing Sector Fetcher
+name: AI Auto-Healing Sector Fetcher V3
 
 on:
   schedule:
-    - cron: '30 8 * * *'
-  workflow_dispatch:
+    - cron: '30 8 * * *'  # 每天北京时间 16:30 运行 (收盘后)
+  workflow_dispatch:      # 支持手动触发
 
 permissions:
   contents: write
@@ -26,33 +26,44 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install -r requirements.txt
-          # 💡 Scrapling 依赖 playwright，但需要通过 python -m playwright 方式调用安装
+          # 安装 Scrapling 依赖的底层浏览器内核
           python -m playwright install chromium --with-deps
+
+      # 💡 核心步骤：持久化 DuckDB 数据库文件
+      # 这样增量逻辑 (last_date + 1) 才能在明天的运行中生效
+      - name: Restore Data Warehouse Cache
+        uses: actions/cache@v4
+        with:
+          path: data/sector_quant.db
+          key: sector-db-${{ github.run_id }}
+          restore-keys: |
+            sector-db-
 
       - name: Run Engine
         env:
-          CONCURRENCY: 8 # 💡 稳健起见调低至 8
-          # 💡 确保 GitHub Secret 名字为 CF_WORKER_URLS
+          CONCURRENCY: 8  # 工业级稳健并发
+          # 💡 请确保在 GitHub Repo -> Settings -> Secrets -> Actions 中配置了此变量
+          # 格式示例: worker1.dev,worker2.dev
           CF_WORKER_URLS: ${{ secrets.CF_WORKER_URLS }}
+          DATA_PATH: "data/sector_klines_full.parquet"
         run: python main.py
 
-      - name: Upload DB Artifact # 💡 现在主存是 DB
-        uses: upload-artifact@v4
+      # 导出结果供下载查看 (Parquet 适合分析，DB 适合存储)
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: sector-warehouse
-          path: data/sector_quant.db
+          name: sector-data-package
+          path: |
+            data/sector_quant.db
+            data/sector_klines_full.parquet
 
-      - name: Auto-Commit If Data Updated
+      # 如果有配置规则变动，自动提交代码仓（可选）
+      - name: Auto-Commit Metadata
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          # 如果有数据更新则提交（可选，如果数据太大建议只传 Artifact）
-          git add data/*.parquet || true
-          git commit -m "🤖 Data Update: Sector Klines Incremental" || true
-          git push || true
-
-      - name: Upload Data Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sector-data
-          path: data/*.parquet
+          if [[ -n $(git status --porcelain config/) ]]; then
+            git add config/*.json
+            git commit -m "🤖 AI Auto-Healed: Update Sector Metadata"
+            git push
+          fi
