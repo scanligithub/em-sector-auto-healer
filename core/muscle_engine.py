@@ -34,6 +34,15 @@ class MuscleEngine:
         }
         self.concurrency = int(os.getenv("CONCURRENCY", 10))
         self.impersonate = "chrome124"
+        
+        # Worker 错误统计
+        self.worker_error_stats = {
+            "total_requests": 0,
+            "error_count": 0,
+            "error_by_code": {},  # {status_code: count}
+            "last_error": None,
+            "last_error_time": None
+        }
 
     def _route_url(self, target_url: str) -> str:
         """强制 100% 穿透 Worker"""
@@ -52,21 +61,67 @@ class MuscleEngine:
         except:
             return {}
 
+    async def check_worker_health(self) -> dict:
+        """检查 Worker 健康状态，返回健康信息或 None"""
+        if not self.worker_url:
+            logger.warning("⚠️ 未配置 CF_WORKER_URL，跳过健康检查")
+            return None
+        try:
+            health_url = f"{self.worker_url}?health"
+            async with AsyncSession(impersonate=self.impersonate) as session:
+                resp = await session.get(health_url, headers=self.headers, timeout=10)
+                if resp.status_code == 200:
+                    stats = json.loads(resp.text)
+                    logger.success(f"💚 Worker 健康检查通过: {json.dumps(stats, ensure_ascii=False)}")
+                    return stats
+                else:
+                    logger.error(f"💔 Worker 健康检查失败: HTTP {resp.status_code}")
+                    return None
+        except Exception as e:
+            logger.error(f"💔 Worker 健康检查异常: {e}")
+            return None
+
     async def _safe_request(self, session, url: str, label: str) -> dict:
-        """核心请求器：只走代理，不成功便退避"""
+        """核心请求器：只走代理，不成功便退避，并记录 Worker 错误统计"""
         routed = self._route_url(url)
         for attempt in range(3):
             try:
                 # 增加请求间隔随机性
                 await asyncio.sleep(random.uniform(0.5, 1.2) * attempt)
                 resp = await session.get(routed, headers=self.headers, timeout=25)
+                self.worker_error_stats["total_requests"] += 1
                 if resp.status_code == 200:
                     data = self._extract_json(resp.text)
                     if data and data.get("data"): return data
+                # 记录错误统计
+                self.worker_error_stats["error_count"] += 1
+                code_key = str(resp.status_code)
+                self.worker_error_stats["error_by_code"][code_key] = \
+                    self.worker_error_stats["error_by_code"].get(code_key, 0) + 1
+                self.worker_error_stats["last_error"] = f"HTTP {resp.status_code}"
+                self.worker_error_stats["last_error_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
                 logger.debug(f"⚠️ {label} 尝试 {attempt+1} 失败: HTTP {resp.status_code}")
             except Exception as e:
+                self.worker_error_stats["error_count"] += 1
+                self.worker_error_stats["last_error"] = str(e)[:200]
+                self.worker_error_stats["last_error_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
                 logger.debug(f"🕒 {label} 网络波动: {e}")
         return {}
+
+    def get_worker_error_summary(self) -> str:
+        """生成 Worker 错误摘要报告"""
+        stats = self.worker_error_stats
+        if stats["total_requests"] == 0:
+            return "📊 Worker 统计: 暂无请求记录"
+        error_rate = (stats["error_count"] / stats["total_requests"]) * 100 if stats["total_requests"] > 0 else 0
+        lines = [
+            f"📊 Worker 错误统计摘要:",
+            f"   总请求数: {stats['total_requests']}",
+            f"   错误数: {stats['error_count']} ({error_rate:.1f}%)",
+            f"   错误码分布: {json.dumps(stats['error_by_code'], ensure_ascii=False)}",
+            f"   最后错误: {stats['last_error']} @ {stats['last_error_time']}"
+        ]
+        return "\n".join(lines)
 
     async def fetch_dynamic_sector_list(self) -> list:
         """
