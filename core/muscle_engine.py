@@ -6,168 +6,164 @@ import time
 import random
 import urllib.parse
 import polars as pl
+import duckdb
 from loguru import logger
 from curl_cffi.requests import AsyncSession
+from scrapling import Stealer
 
 class MuscleEngine:
-    # 💡 极其重要的静态兜底：如果 API 暂时波动，保证核心板块不掉队
-    # 包含：白酒、半导体、光伏、新能源车、人工智能、银行、证券、医药、军工、地产
-    FALLBACK_SECTORS = [
-        "90.BK0896", "90.BK1036", "90.BK0475", "90.BK1027", "90.BK0800",
-        "90.BK0427", "90.BK0473", "90.BK0447", "90.BK0490", "90.BK0451"
-    ]
-    
     UT = "fa5fd1943c7b386f172d6893dbfba10b"
 
     def __init__(self):
-        raw_worker = os.getenv("CF_WORKER_URL", "").strip()
-        self.worker_url = raw_worker if raw_worker.startswith("http") else f"https://{raw_worker}" if raw_worker else ""
-        if not self.worker_url:
-            logger.critical("🚨 未检测到 CF_WORKER_URL，全线代理模式无法启动！")
+        # 1. Worker 池化加载
+        raw_urls = os.getenv("CF_WORKER_URLS", "").split(",")
+        self.worker_pool = [
+            (url.strip() if url.startswith("http") else f"https://{url.strip()}")
+            for url in raw_urls if url.strip()
+        ]
+        if not self.worker_pool:
+            logger.critical("🚨 未配置 CF_WORKER_URLS，请检查环境变量！")
             
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Referer": "https://quote.eastmoney.com/",
-            "Accept": "*/*",
-            "Accept-Encoding": "gzip, deflate",
-            "Connection": "keep-alive"
-        }
         self.concurrency = int(os.getenv("CONCURRENCY", 10))
+        self.data_path = os.getenv("DATA_PATH", "data/sector_klines_full.parquet")
         self.impersonate = "chrome124"
+        self.trust_context = {"cookies": {}, "headers": {}}
         
-        # Worker 错误统计
-        self.worker_error_stats = {
-            "total_requests": 0,
-            "error_count": 0,
-            "error_by_code": {},  # {status_code: count}
-            "last_error": None,
-            "last_error_time": None
-        }
+        # 统计指标
+        self.stats = {"total": 0, "errors": 0, "codes": {}}
 
-    def _route_url(self, target_url: str) -> str:
-        """强制 100% 穿透 Worker"""
-        # 注入毫秒级 Cache-Buster 确保穿透 CF 边缘缓存
-        bust_url = f"{target_url}&_cb={time.time_ns()}" if "?" in target_url else f"{target_url}?_cb={time.time_ns()}"
-        if self.worker_url:
-            return f"{self.worker_url}?url={urllib.parse.quote(bust_url, safe='')}"
-        return bust_url
-
-    def _extract_json(self, text: str) -> dict:
-        if not text: return {}
-        # 兼容 JSONP 和 纯 JSON
-        match = re.search(r'^[^(]*\(\s*(\{.*\})\s*\)\s*;?\s*$', text, re.DOTALL)
+    async def build_trust_chain(self):
+        """Phase 0: 使用 Scrapling 建立信任链，导出 Cookie 和指纹"""
+        logger.info("🔑 [Phase 0] 启动 Scrapling 建立信任链...")
         try:
-            return json.loads(match.group(1) if match else text)
-        except:
-            return {}
-
-    async def check_worker_health(self) -> dict:
-        """检查 Worker 健康状态，返回健康信息或 None"""
-        if not self.worker_url:
-            logger.warning("⚠️ 未配置 CF_WORKER_URL，跳过健康检查")
-            return None
-        try:
-            health_url = f"{self.worker_url}?health"
-            async with AsyncSession(impersonate=self.impersonate) as session:
-                resp = await session.get(health_url, headers=self.headers, timeout=10)
-                if resp.status_code == 200:
-                    stats = json.loads(resp.text)
-                    logger.success(f"💚 Worker 健康检查通过: {json.dumps(stats, ensure_ascii=False)}")
-                    return stats
-                else:
-                    logger.error(f"💔 Worker 健康检查失败: HTTP {resp.status_code}")
-                    return None
+            # 仅在获取初始信任态时启动轻量级浏览器
+            stealer = Stealer(headless=True)
+            result = stealer.get("https://quote.eastmoney.com/center/hsbk.html")
+            
+            # 提取东财核心风控 Cookie
+            self.trust_context["cookies"] = result.cookies
+            self.trust_context["headers"] = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Referer": "https://quote.eastmoney.com/",
+                "Accept": "*/*"
+            }
+            logger.success(f"✅ 信任链构建成功，获取 Cookie: {len(result.cookies)} 项")
+            stealer.quit() # 立即释放内存
         except Exception as e:
-            logger.error(f"💔 Worker 健康检查异常: {e}")
-            return None
+            logger.error(f"⚠️ 信任链构建失败 (将尝试空态运行): {e}")
 
-    async def _safe_request(self, session, url: str, label: str) -> dict:
-        """核心请求器：只走代理，不成功便退避，并记录 Worker 错误统计"""
-        routed = self._route_url(url)
+    def _route_url(self, target_url: str, use_smart_cache: bool = False) -> str:
+        """Worker 池化随机路由 + 分级缓存策略"""
+        # 如果是 K 线请求，使用 30 秒窗口缓存以降低回源压力
+        if use_smart_cache:
+            cache_window = int(time.time() / 30)
+            target_url += f"&_ts={cache_window}"
+        else:
+            target_url += f"&_cb={time.time_ns()}"
+
+        worker_base = random.choice(self.worker_pool)
+        return f"{worker_base}?url={urllib.parse.quote(target_url, safe='')}"
+
+    async def _safe_request(self, session, url: str, label: str, cache: bool = False) -> dict:
+        routed = self._route_url(url, use_smart_cache=cache)
         for attempt in range(3):
             try:
-                # 增加请求间隔随机性
-                await asyncio.sleep(random.uniform(0.5, 1.2) * attempt)
-                resp = await session.get(routed, headers=self.headers, timeout=25)
-                self.worker_error_stats["total_requests"] += 1
+                await asyncio.sleep(random.uniform(0.1, 0.5) * attempt)
+                resp = await session.get(
+                    routed, 
+                    headers=self.trust_context["headers"], 
+                    cookies=self.trust_context["cookies"],
+                    timeout=25
+                )
+                self.stats["total"] += 1
                 if resp.status_code == 200:
-                    data = self._extract_json(resp.text)
-                    if data and data.get("data"): return data
-                # 记录错误统计
-                self.worker_error_stats["error_count"] += 1
-                code_key = str(resp.status_code)
-                self.worker_error_stats["error_by_code"][code_key] = \
-                    self.worker_error_stats["error_by_code"].get(code_key, 0) + 1
-                self.worker_error_stats["last_error"] = f"HTTP {resp.status_code}"
-                self.worker_error_stats["last_error_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
-                logger.debug(f"⚠️ {label} 尝试 {attempt+1} 失败: HTTP {resp.status_code}")
+                    # 兼容 JSONP
+                    text = resp.text
+                    match = re.search(r'^[^(]*\(\s*(\{.*\})\s*\)\s*;?\s*$', text, re.DOTALL)
+                    return json.loads(match.group(1) if match else text)
+                
+                self.stats["errors"] += 1
+                self.stats["codes"][resp.status_code] = self.stats["codes"].get(resp.status_code, 0) + 1
             except Exception as e:
-                self.worker_error_stats["error_count"] += 1
-                self.worker_error_stats["last_error"] = str(e)[:200]
-                self.worker_error_stats["last_error_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                self.stats["errors"] += 1
                 logger.debug(f"🕒 {label} 网络波动: {e}")
         return {}
 
-    def get_worker_error_summary(self) -> str:
-        """生成 Worker 错误摘要报告"""
-        stats = self.worker_error_stats
-        if stats["total_requests"] == 0:
-            return "📊 Worker 统计: 暂无请求记录"
-        error_rate = (stats["error_count"] / stats["total_requests"]) * 100 if stats["total_requests"] > 0 else 0
-        lines = [
-            f"📊 Worker 错误统计摘要:",
-            f"   总请求数: {stats['total_requests']}",
-            f"   错误数: {stats['error_count']} ({error_rate:.1f}%)",
-            f"   错误码分布: {json.dumps(stats['error_by_code'], ensure_ascii=False)}",
-            f"   最后错误: {stats['last_error']} @ {stats['last_error_time']}"
-        ]
-        return "\n".join(lines)
-
     async def fetch_dynamic_sector_list(self) -> list:
-        """
-        Phase 1: 穿透代理扫描目录
-        不再通过 Playwright，直接用 curl_cffi 打 API
-        """
-        logger.info("💪 [Phase 1] 启动全代理目录扫描...")
+        """Phase 1: 高韧性分页扫描目录"""
+        logger.info("📡 [Phase 1] 启动高韧性目录扫描...")
         all_codes = set()
-        # 将地域(t:1)、行业(t:2)、概念(t:3) 分开扫描，降低单次载荷
         categories = {"地域": "m:90+t:1", "行业": "m:90+t:2", "概念": "m:90+t:3"}
         
         async with AsyncSession(impersonate=self.impersonate) as session:
             for cat_name, fs in categories.items():
-                logger.info(f"➡️ 正在扫描板块分类: {cat_name}")
-                # 💡 每次只抓 250 条，分两页抓，确保 100% 成功率
-                for pn in [1, 2, 3]:
-                    url = (
-                        f"https://push2.eastmoney.com/api/qt/clist/get?pn={pn}&pz=250&po=1&np=1"
-                        f"&fltt=2&invt=2&fid=f3&fs={urllib.parse.quote(fs)}&fields=f12&ut={self.UT}"
-                    )
+                empty_tolerance = 0
+                for pn in range(1, 15): # 扩大扫描范围
+                    if empty_tolerance >= 3: break # 连续 3 页失败/空才停止
+                    
+                    url = (f"https://push2.eastmoney.com/api/qt/clist/get?pn={pn}&pz=250&po=1&np=1"
+                           f"&fltt=2&invt=2&fid=f3&fs={urllib.parse.quote(fs)}&fields=f12&ut={self.UT}")
+                    
                     data = await self._safe_request(session, url, f"LIST_{cat_name}_P{pn}")
                     if data and data.get("data") and data["data"].get("diff"):
-                        for x in data["data"]["diff"]:
-                            all_codes.add(f"90.{x['f12']}")
-                        if len(data["data"]["diff"]) < 250: break
+                        items = data["data"]["diff"]
+                        for x in items: all_codes.add(f"90.{x['f12']}")
+                        empty_tolerance = 0 # 重置容错计数
+                        if len(items) < 250: break
                     else:
-                        break # 该分类抓取结束或失败
+                        empty_tolerance += 1
+                        logger.warning(f"⚠️ {cat_name} 第 {pn} 页异常，容错计数: {empty_tolerance}/3")
         
-        if not all_codes:
-            logger.warning("❌ 全代理扫描未果，启用【静态核心库】兜底运行")
-            return self.FALLBACK_SECTORS
-            
-        logger.success(f"💪 [Phase 1] 扫描成功，共获取 {len(all_codes)} 个活跃板块。")
+        logger.success(f"💪 扫描完成，共获取 {len(all_codes)} 个活跃板块")
         return list(all_codes)
 
-    async def _fetch_kline_worker(self, session, secid: str, semaphore: asyncio.Semaphore):
-        """Phase 2: 高并发 K 线拉取"""
-        async with semaphore:
-            # 增加极短的抖动，防止批量请求在同一毫秒到达 Worker
-            await asyncio.sleep(random.uniform(0.01, 0.1))
-            url = (
-                f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}"
-                f"&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
-                f"&klt=101&fqt=0&end=20500101&lmt=100000&ut={self.UT}"
-            )
-            data = await self._safe_request(session, url, f"KLINE_{secid}")
+    def get_last_dates(self) -> dict:
+        """利用 DuckDB 极速提取存量数据的最后日期"""
+        if not os.path.exists(self.data_path):
+            return {}
+        try:
+            logger.info("🔎 正在提取存量数据最后截止日期...")
+            # DuckDB 谓词下推扫描，内存占用极低
+            df_dates = duckdb.query(f"""
+                SELECT secid, MAX(CAST(date AS VARCHAR)) as max_date 
+                FROM read_parquet('{self.data_path}') 
+                GROUP BY secid
+            """).pl()
+            return dict(zip(df_dates["secid"], df_dates["max_date"]))
+        except Exception as e:
+            logger.error(f"❌ 提取存量日期失败: {e}")
+            return {}
+
+    async def fetch_all_sectors(self, sector_list: list):
+        """Phase 2: 增量并发引擎"""
+        last_dates = self.get_last_dates()
+        logger.info(f"🚀 [Phase 2] 启动增量并发引擎 | 存量锚点: {len(last_dates)} 个")
+        
+        semaphore = asyncio.Semaphore(self.concurrency)
+        all_results = []
+        
+        async with AsyncSession(impersonate=self.impersonate, max_clients=self.concurrency) as session:
+            tasks = []
+            for sid in sector_list:
+                # 识别增量日期：如果是存量板块，则从最后一天开始拉取
+                last_d = last_dates.get(sid, "19900101").replace("-", "")
+                tasks.append(self._fetch_kline_incremental(session, sid, last_d, semaphore))
+            
+            for coro in asyncio.as_completed(tasks):
+                res = await coro
+                if res: all_results.extend(res)
+        
+        if all_results:
+            self._save_data(all_results)
+
+    async def _fetch_kline_incremental(self, session, secid: str, beg_date: str, sem: asyncio.Semaphore):
+        async with sem:
+            url = (f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}"
+                   f"&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+                   f"&klt=101&fqt=0&end=20500101&beg={beg_date}&lmt=100000&ut={self.UT}")
+            
+            # 使用智能缓存路由，降低回源频率
+            data = await self._safe_request(session, url, f"KLINE_{secid}", cache=True)
             if data and data.get("data") and data["data"].get("klines"):
                 res = []
                 for r in data["data"]["klines"]:
@@ -181,22 +177,18 @@ class MuscleEngine:
                 return res
             return []
 
-    async def fetch_all_sectors(self, sector_list: list):
-        logger.info(f"💪 [Phase 2] 启动并发引擎 | Concurrency: {self.concurrency}")
-        semaphore = asyncio.Semaphore(self.concurrency)
-        all_results = []
+    def _save_data(self, new_data: list):
+        os.makedirs("data", exist_ok=True)
+        new_df = pl.DataFrame(new_data)
         
-        async with AsyncSession(impersonate=self.impersonate, max_clients=self.concurrency) as session:
-            tasks = [self._fetch_kline_worker(session, sid, semaphore) for sid in sector_list]
-            for coro in asyncio.as_completed(tasks):
-                res = await coro
-                if res:
-                    all_results.extend(res)
-                    if len(all_results) > 0 and len(all_results) % 50000 == 0:
-                        logger.info(f"📊 数据规模监测: 已获取 {len(all_results)} 条 K 线")
-        
-        if all_results:
-            os.makedirs("data", exist_ok=True)
-            df = pl.DataFrame(all_results)
-            df.write_parquet("data/sector_klines_full.parquet", compression="zstd")
-            logger.success(f"💾 任务圆满完成！落盘 {len(all_results)} 行数据。")
+        if os.path.exists(self.data_path):
+            # 增量合并与去重
+            history_df = pl.read_parquet(self.data_path)
+            final_df = pl.concat([history_df, new_df]).unique(subset=["secid", "date"], keep="last")
+            logger.info(f"📊 增量合并完成: 存量 {len(history_df)} + 新增 {len(new_data)} -> 总计 {len(final_df)}")
+        else:
+            final_df = new_df
+            logger.info(f"📊 初始落盘: {len(final_df)} 行")
+            
+        final_df.sort(["secid", "date"]).write_parquet(self.data_path, compression="zstd")
+        logger.success(f"💾 数据已安全持久化至 {self.data_path}")
