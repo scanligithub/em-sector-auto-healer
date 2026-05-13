@@ -26,8 +26,8 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install -r requirements.txt
-          # 💡 关键修改：安装 scrapling 所需的底层浏览器引擎及系统依赖
-          python -m scrapling install
+          # 💡 Scrapling 依赖 playwright，但需要通过 python -m playwright 方式调用安装
+          python -m playwright install chromium --with-deps
 
       - name: Run Engine
         env:
