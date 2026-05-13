@@ -26,7 +26,6 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install -r requirements.txt
-          playwright install chromium --with-deps
 
       - name: Run Engine
         env:
@@ -34,7 +33,7 @@ jobs:
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL_NAME: ${{ secrets.LLM_MODEL_NAME }}
           CONCURRENCY: 10  # 💡 建议测试阶段降到 10，保护 Worker
-          CF_WORKER_URL: "setor.workers.dev" # 💡 补上你的 Worker 域名！
+          CF_WORKER_URL: "setor.scanliworkersdev.workers.dev" # 💡 补上你的 Worker 域名！
         run: python main.py
 
       - name: Auto-Commit If Rules Changed
