@@ -21,13 +21,18 @@ async def main():
     if sector_list:
         await engine.sync_all_klines(sector_list)
         
-        # 3. 错误统计汇总
-        total = engine.stats['total']
+        # 3. 错误统计汇总 (已修复统计字典的 Key)
+        total = engine.stats.get('total_tasks', 0)
+        failed = engine.stats.get('failed_tasks', 0)
+        
         if total > 0:
-            err_rate = (engine.stats['errors'] / total * 100)
-            logger.info(f"📊 流量统计: 总请求 {total} | 失败率 {err_rate:.1f}% | 状态码分布: {engine.stats['codes']}")
+            err_rate = (failed / total * 100)
+            logger.info(f"📊 流量统计: 总任务数 {total} | 失败率 {err_rate:.1f}% | 状态码分布: {engine.stats['codes']}")
     else:
         logger.error("❌ 未能获取有效板块名录")
 
 if __name__ == "__main__":
+    import sys
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())
