@@ -3,6 +3,7 @@ import json
 import os
 import re
 import duckdb
+import random
 from loguru import logger
 from playwright.async_api import async_playwright
 
@@ -38,21 +39,26 @@ class MuscleEngine:
             finally:
                 self.db_queue.task_done()
 
-    async def run_sniffing_mission(self, context, sid, semaphore):
+    async def apply_stealth(self, page):
+        """注入隐匿脚本，抹除 Playwright 特征"""
+        stealth_js = """
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        window.chrome = { runtime: {} };
+        Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh']});
+        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+        """
+        await page.add_init_script(stealth_js)
+
+    async def run_stealth_sniffing(self, context, sid, semaphore):
         async with semaphore:
             self.stats["total"] += 1
             page = await context.new_page()
-            
-            # 策略 1: 拦截并丢弃所有无关资源（图片、广告、字体），极大提升加载速度
-            await page.route("**/*.{png,jpg,jpeg,gif,woff,woff2,css}", lambda route: route.abort())
-            await page.route(re.compile(r"analytics|pos\.baidu\.com|stats"), lambda route: route.abort())
+            await self.apply_stealth(page)
+
+            # 精准路由：只拦截广告和统计，保留基础 CSS 保证布局
+            await page.route(re.compile(r"pos\.baidu\.com|stats|analytics|adshow"), lambda r: r.abort())
 
             captured_payload = {"data": None}
-
-            # 诊断日志：记录每一个请求
-            async def log_request(request):
-                if "push2his" in request.url:
-                    logger.debug(f"🔍 [Intercept] 发现候选包: {request.url[:80]}...")
 
             async def handle_response(response):
                 url = response.url
@@ -64,46 +70,48 @@ class MuscleEngine:
                         data = json.loads(clean_json)
                         if data.get("data", {}).get("klines"):
                             captured_payload["data"] = data["data"]["klines"]
-                            logger.success(f"✅ [Sniffer] 成功捕获全量 K 线包: {sid}")
-                    except Exception as e:
-                        logger.error(f"❌ [Sniffer] 包解析失败: {e}")
+                            logger.success(f"🎯 [V9] {sid} 全量包截获成功！")
+                    except: pass
 
-            page.on("request", log_request)
             page.on("response", handle_response)
-            
-            # 诊断：记录加载失败的请求
-            page.on("requestfailed", lambda req: logger.debug(f"⚠️ 请求失败: {req.url[:60]} | {req.failure}"))
 
             try:
+                # 1. 拟人化打开页面
                 url = f"https://quote.eastmoney.com/bk/{sid}.html"
-                logger.info(f"🚀 [Target] 正在导航至: {sid}")
+                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
                 
-                # 策略 2: 放弃 networkidle，改用 commit 后立即开始轮询关键元素
-                await page.goto(url, wait_until="commit", timeout=45000)
-                
-                # 等待 DOM 树中的 Chart 容器出现即可，不理会其他广告
-                try:
-                    await page.wait_for_selector("canvas", timeout=15000)
-                    logger.debug(f"📈 [UI] {sid} K 线图容器已就绪")
-                except:
-                    logger.warning(f"⚠️ [UI] {sid} K 线图容器未在 15s 内加载，尝试盲拖")
+                # 2. 检查是否触发验证码
+                if "smartvcode" in page.url or await page.locator("#smartvcode").is_visible():
+                    logger.error(f"🛑 {sid} 触发验证码拦截，跳过")
+                    return
 
-                # 策略 3: 模拟物理拖拽（增加偏移量容错）
-                # 我们在图表大概位置进行一次“暴力拉取”
-                await asyncio.sleep(3)
+                # 3. 动态定位 K 线图容器（根据截图，找到 chart 区域）
+                # 东财通常使用 canvas 绘图，我们找最显眼的那个
+                chart_locator = page.locator("canvas").first
+                await chart_locator.wait_for(state="visible", timeout=20000)
+                box = await chart_locator.bounding_box()
                 
-                logger.info(f"🖱️ [Action] {sid} 执行物理拖拽触发历史补全...")
-                # 尝试多个可能的滑块高度，增加成功率
-                for y_offset in [560, 580]:
-                    await page.mouse.move(1100, y_offset)
-                    await page.mouse.down()
-                    await page.mouse.move(200, y_offset, steps=40)
-                    await page.mouse.up()
-                    await asyncio.sleep(1)
-                    if captured_payload["data"]: break
+                if not box:
+                    logger.warning(f"⚠️ {sid} 无法获取图表布局")
+                    return
 
-                # 等待数据包到达
-                for _ in range(5):
+                logger.info(f"📍 [Layout] {sid} 容器定位: x={box['x']}, y={box['y']}, w={box['width']}")
+
+                # 4. 拟人化滑块操作
+                # 根据截图，Navigator 在 Chart 底部，我们取底部向上 15% 的位置
+                drag_y = box['y'] + box['height'] * 0.88 
+                start_x = box['x'] + box['width'] * 0.9  # 右侧手柄
+                end_x = box['x'] + box['width'] * 0.1    # 向左拉到底
+
+                # 模拟真人：先 hover，停顿，再拖拽
+                await page.mouse.move(start_x, drag_y)
+                await asyncio.sleep(random.uniform(0.5, 1.2))
+                await page.mouse.down()
+                await page.mouse.move(end_x, drag_y, steps=random.randint(60, 100)) # 极慢速平滑拖拽
+                await page.mouse.up()
+
+                # 5. 等待数据回传
+                for _ in range(8):
                     if captured_payload["data"]: break
                     await asyncio.sleep(1)
 
@@ -114,27 +122,38 @@ class MuscleEngine:
                             for k in klines]
                     await self.db_queue.put((sid, batch))
                 else:
-                    # 失败截图，帮助我们在 Github Artifacts 中定位原因
-                    await page.screenshot(path=f"data/{sid}_fail.png")
-                    logger.warning(f"🚫 {sid} 最终未能捕获全量包")
+                    logger.warning(f"🚫 {sid} 拖拽完成但无流量回传")
 
             except Exception as e:
-                logger.error(f"💥 {sid} 运行异常: {str(e)}")
+                logger.error(f"💥 {sid} 任务异常: {str(e)[:100]}")
             finally:
                 await page.close()
 
     async def run_factory(self, sector_list):
-        logger.info(f"🎭 [V8-Nitro] 并发: {self.concurrency}")
+        logger.info(f"👻 [V9 Stealth Mode] 启动中...")
         writer = asyncio.create_task(self.db_writer_task())
+        
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
-            context = await browser.new_context(viewport={'width': 1280, 'height': 800})
+            # 模拟真实的浏览器启动参数
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--use-gl=desktop', # 强制开启 GPU 渲染支持，防止 Canvas 不加载
+                    '--no-sandbox'
+                ]
+            )
+            
+            context = await browser.new_context(
+                viewport={'width': 1280, 'height': 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
             
             semaphore = asyncio.Semaphore(self.concurrency)
-            tasks = [self.run_sniffing_mission(context, sid, semaphore) for sid in sector_list]
+            tasks = [self.run_stealth_sniffing(context, sid, semaphore) for sid in sector_list]
             await asyncio.gather(*tasks)
             await browser.close()
 
         await self.db_queue.put(None)
         await writer
-        logger.success(f"🏁 压测总结 | 成功: {self.stats['success']} | 总行数: {self.stats['rows']}")
+        logger.success(f"🏁 同步结束")
