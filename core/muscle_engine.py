@@ -9,130 +9,111 @@ from loguru import logger
 from playwright.async_api import async_playwright
 
 class MuscleEngine:
+    UT = "fa5fd1943c7b386f172d6893dbfba10b"
+
     def __init__(self):
-        self.concurrency = int(os.getenv("CONCURRENCY", 3)) # 浏览器占用高，建议并发 2-4
+        # 🚀 降维：在 GitHub Actions 里，2 个并发浏览器才是最快的
+        self.concurrency = 2 
         self.db_path = "data/sector_quant.db"
         self.db_queue = asyncio.Queue()
-        self.stats = {"total_tasks": 0, "success_tasks": 0, "failed_tasks": 0}
+        self.stats = {"total": 0, "success": 0, "failed": 0}
         
         os.makedirs("data", exist_ok=True)
         self.conn = duckdb.connect(self.db_path)
         self._init_db()
 
     def _init_db(self):
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS sector_klines (
-                secid VARCHAR, date DATE, open DOUBLE, close DOUBLE,
-                high DOUBLE, low DOUBLE, volume DOUBLE, amount DOUBLE,
-                PRIMARY KEY(secid, date)
-            )
-        """)
+        self.conn.execute("CREATE TABLE IF NOT EXISTS sector_klines (secid VARCHAR, date DATE, open DOUBLE, close DOUBLE, high DOUBLE, low DOUBLE, volume DOUBLE, amount DOUBLE, PRIMARY KEY(secid, date))")
         self.conn.execute("CREATE TABLE IF NOT EXISTS sector_master (secid VARCHAR PRIMARY KEY, last_update TIMESTAMP)")
 
     async def db_writer_task(self):
-        """串行写入确保 DuckDB 安全"""
         while True:
             item = await self.db_queue.get()
             if item is None: break
             sid, batch = item
             try:
                 self.conn.executemany("INSERT OR IGNORE INTO sector_klines VALUES (?, ?, ?, ?, ?, ?, ?, ?)", batch)
-                self.stats["success_tasks"] += 1
+                self.stats["success"] += 1
             except Exception as e:
                 logger.error(f"💾 {sid} 入库失败: {e}")
             finally:
                 self.db_queue.task_done()
 
-    async def intercept_sector(self, browser, sid, semaphore):
-        """单页面劫持逻辑"""
+    async def hijack_fetch(self, browser, sid, semaphore):
+        """核心：在浏览器上下文内执行伪造 Fetch"""
         async with semaphore:
-            self.stats["total_tasks"] += 1
-            context = await browser.new_context(
-                viewport={'width': 1280, 'height': 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            )
+            self.stats["total"] += 1
+            context = await browser.new_context(viewport={'width': 800, 'height': 600})
             page = await context.new_page()
-            captured_data = {"batch": None}
-
-            # 💡 核心：流量监听器
-            async def handle_response(response):
-                if "kline/get" in response.url and "lmt=1000000" in response.url:
-                    try:
-                        text = await response.text()
-                        # 剥离 JSONP
-                        match = re.search(r'jQuery\d+_\d+\((.*)\)', text, re.DOTALL)
-                        if match:
-                            data = json.loads(match.group(1))
-                            if data.get("rc") == 0 and data.get("data", {}).get("klines"):
-                                klines = data["data"]["klines"]
-                                captured_data["batch"] = [
-                                    (sid, k.split(',')[0], float(k.split(',')[1]), float(k.split(',')[2]),
-                                     float(k.split(',')[3]), float(k.split(',')[4]), float(k.split(',')[5]), float(k.split(',')[6]))
-                                    for k in klines
-                                ]
-                    except Exception as e:
-                        logger.debug(f"⚠️ 解析拦截内容失败: {e}")
-
-            page.on("response", handle_response)
-
+            
             try:
-                # 1. 导航
+                # 1. 快速导航（只需加载基础框架）
                 url = f"https://quote.eastmoney.com/bk/{sid}.html"
-                await page.goto(url, wait_until="networkidle", timeout=60000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                 
-                # 2. 模拟劫持动作：拖拽滑块
-                # 东财的滑块通常在 K 线图下方，这里使用相对坐标或寻找特定 Canvas
-                # 为了稳健，我们直接在页面上模拟一次“由右向左”的长距离拖拽
-                await page.mouse.move(800, 600)
-                await page.mouse.down()
-                await page.mouse.move(200, 600, steps=20)
-                await page.mouse.up()
+                # 💡 留出 1.5 秒给浏览器种下 psi 等动态 Cookie
+                await asyncio.sleep(1.5)
 
-                # 3. 等待数据捕获 (最多等 10 秒)
-                for _ in range(20):
-                    if captured_data["batch"]: break
-                    await asyncio.sleep(0.5)
+                # 2. 注入 JS：直接在浏览器内部发起 Fetch 请求
+                # 这是最强劫持：它继承了当前页面的所有 Cookie、TLS 和身份
+                api_url = (f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={sid}"
+                           f"&ut={self.UT}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+                           f"&klt=101&fqt=1&end=20500101&lmt=1000000")
+                
+                js_code = f"""
+                async () => {{
+                    const resp = await fetch('{api_url}');
+                    return await resp.text();
+                }}
+                """
+                raw_text = await page.evaluate(js_code)
 
-                if captured_data["batch"]:
-                    await self.db_queue.put((sid, captured_data["batch"]))
-                    logger.success(f"🎯 {sid} 捕获成功 | 行数: {len(captured_data['batch'])}")
+                # 3. 解析结果
+                if raw_text:
+                    # 剥离可能存在的 JSONP 外壳
+                    match = re.search(r'\((.*)\)', raw_text, re.DOTALL)
+                    clean_json = match.group(1) if match else raw_text
+                    data = json.loads(clean_json)
+                    
+                    if data.get("rc") == 0 and data.get("data", {}).get("klines"):
+                        klines = data["data"]["klines"]
+                        batch = [(sid, k.split(',')[0], float(k.split(',')[1]), float(k.split(',')[2]), 
+                                 float(k.split(',')[3]), float(k.split(',')[4]), float(k.split(',')[5]), float(k.split(',')[6])) 
+                                for k in klines]
+                        await self.db_queue.put((sid, batch))
+                        logger.success(f"🎯 {sid} 劫持成功 | 获得 {len(klines)} 行全量数据")
+                    else:
+                        logger.warning(f"❌ {sid} 接口回馈异常: {raw_text[:100]}")
+                        self.stats["failed"] += 1
                 else:
-                    self.stats["failed_tasks"] += 1
-                    logger.warning(f"❌ {sid} 劫持失败：未监听到全量 API 响应")
+                    self.stats["failed"] += 1
 
             except Exception as e:
-                self.stats["failed_tasks"] += 1
-                logger.error(f"❌ {sid} 页面异常: {e}")
+                self.stats["failed"] += 1
+                logger.debug(f"⚠️ {sid} 渗透失败: {str(e)[:50]}")
             finally:
                 await context.close()
 
     async def get_active_sectors(self) -> list:
-        """从本地 DB 加载名录"""
         res = self.conn.execute("SELECT secid FROM sector_master").fetchall()
         return [r[0] for r in res]
 
     async def run_factory(self, sector_list):
-        """启动劫持工厂"""
-        logger.info(f"🏗️ [Phase 3] 浏览器劫持工厂启动 | 并发: {self.concurrency}")
-        
-        # 启动 DB 写入者
+        logger.info(f"🏗️ [Phase 3] 浏览器渗透工厂启动 | 并发: {self.concurrency}")
         writer = asyncio.create_task(self.db_writer_task())
         
         async with async_playwright() as p:
-            # 💡 关键：使用无头模式但伪装 stealth
-            browser = await p.chromium.launch(headless=True)
+            # 💡 增加启动参数，降低内存占用
+            browser = await p.chromium.launch(headless=True, args=['--disable-dev-shm-usage', '--no-sandbox'])
             
             semaphore = asyncio.Semaphore(self.concurrency)
-            tasks = [self.intercept_sector(browser, sid, semaphore) for sid in sector_list]
+            tasks = [self.hijack_fetch(browser, sid, semaphore) for sid in sector_list]
             await asyncio.gather(*tasks)
-            
             await browser.close()
 
-        # 关闭 DB
         await self.db_queue.put(None)
         await writer
         
         final_cnt = self.conn.execute("SELECT count(*) FROM sector_klines").fetchone()[0]
-        output_parquet = os.getenv("DATA_PATH", "data/sector_klines_full.parquet")
-        self.conn.execute(f"COPY sector_klines TO '{output_parquet}' (FORMAT PARQUET, COMPRESSION ZSTD)")
-        logger.success(f"🏁 工厂作业完成 | 总量: {final_cnt} | 成功: {self.stats['success_tasks']} | 失败: {self.stats['failed_tasks']}")
+        self.conn.execute(f"COPY sector_klines TO '{os.getenv('DATA_PATH')}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+        logger.success(f"🏁 同步完成 | 库内记录: {final_cnt} | 成功: {self.stats['success']} | 失败: {self.stats['failed']}")
