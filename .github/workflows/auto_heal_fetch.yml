@@ -36,7 +36,7 @@ jobs:
       - name: Run Engine
         env:
           CONCURRENCY: 30
-          CF_WORKER_URLS: ${{ secrets.CF_WORKER_URLS }}
+          CF_WORKER_URLS: ${{ secrets.CF_WORKER_URL }}
           DATA_PATH: "data/sector_klines_full.parquet"
         run: python main.py
 
