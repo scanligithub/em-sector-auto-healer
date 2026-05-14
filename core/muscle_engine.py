@@ -9,23 +9,16 @@ from playwright.async_api import async_playwright
 
 class MuscleEngine:
     def __init__(self):
-        self.concurrency = int(os.getenv("CONCURRENCY", 1))
+        self.concurrency = 1 
         self.db_path = "data/sector_quant.db"
         self.db_queue = asyncio.Queue()
         self.stats = {"total": 0, "success": 0, "failed": 0, "rows": 0}
-        
         os.makedirs("data", exist_ok=True)
         self.conn = duckdb.connect(self.db_path)
         self._init_db()
 
     def _init_db(self):
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS sector_klines (
-                secid VARCHAR, date DATE, open DOUBLE, close DOUBLE, 
-                high DOUBLE, low DOUBLE, volume DOUBLE, amount DOUBLE, 
-                PRIMARY KEY(secid, date)
-            )
-        """)
+        self.conn.execute("CREATE TABLE IF NOT EXISTS sector_klines (secid VARCHAR, date DATE, open DOUBLE, close DOUBLE, high DOUBLE, low DOUBLE, volume DOUBLE, amount DOUBLE, PRIMARY KEY(secid, date))")
 
     async def db_writer_task(self):
         while True:
@@ -36,124 +29,95 @@ class MuscleEngine:
                 self.conn.executemany("INSERT OR IGNORE INTO sector_klines VALUES (?, ?, ?, ?, ?, ?, ?, ?)", batch)
                 self.stats["success"] += 1
                 self.stats["rows"] += len(batch)
-            finally:
-                self.db_queue.task_done()
+            finally: self.db_queue.task_done()
 
-    async def apply_stealth(self, page):
-        """注入隐匿脚本，抹除 Playwright 特征"""
-        stealth_js = """
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        window.chrome = { runtime: {} };
-        Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh']});
-        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-        """
-        await page.add_init_script(stealth_js)
-
-    async def run_stealth_sniffing(self, context, sid, semaphore):
+    async def run_v10_mission(self, context, sid, semaphore):
         async with semaphore:
             self.stats["total"] += 1
             page = await context.new_page()
-            await self.apply_stealth(page)
-
-            # 精准路由：只拦截广告和统计，保留基础 CSS 保证布局
-            await page.route(re.compile(r"pos\.baidu\.com|stats|analytics|adshow"), lambda r: r.abort())
-
-            captured_payload = {"data": None}
-
-            async def handle_response(response):
-                url = response.url
-                if "push2his.eastmoney.com/api/qt/stock/kline/get" in url and "lmt=1000000" in url:
+            # 抹除特征
+            await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            
+            captured_data = {"raw": None}
+            async def handle_response(resp):
+                if "push2his.eastmoney.com" in resp.url and "lmt=1000000" in resp.url:
                     try:
-                        text = await response.text()
+                        text = await resp.text()
                         match = re.search(r'\((.*)\)', text, re.DOTALL)
-                        clean_json = match.group(1) if match else text
-                        data = json.loads(clean_json)
+                        data = json.loads(match.group(1) if match else text)
                         if data.get("data", {}).get("klines"):
-                            captured_payload["data"] = data["data"]["klines"]
-                            logger.success(f"🎯 [V9] {sid} 全量包截获成功！")
+                            captured_data["raw"] = data["data"]["klines"]
+                            logger.success(f"🎯 [V10] {sid} 截获全量包！")
                     except: pass
 
             page.on("response", handle_response)
 
             try:
-                # 1. 拟人化打开页面
                 url = f"https://quote.eastmoney.com/bk/{sid}.html"
-                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                await page.goto(url, wait_until="domcontentloaded")
                 
-                # 2. 检查是否触发验证码
-                if "smartvcode" in page.url or await page.locator("#smartvcode").is_visible():
-                    logger.error(f"🛑 {sid} 触发验证码拦截，跳过")
+                # 策略：东财页面通常有多个 Canvas，Navigator 滑块通常是最后 1-2 个
+                # 我们获取所有 canvas 并对看起来像滑块的那个进行操作
+                canvases = await page.locator("canvas").all()
+                if len(canvases) < 2:
+                    logger.warning(f"⚠️ {sid} 未能发现足够的 Canvas 元素")
                     return
 
-                # 3. 动态定位 K 线图容器（根据截图，找到 chart 区域）
-                # 东财通常使用 canvas 绘图，我们找最显眼的那个
-                chart_locator = page.locator("canvas").first
-                await chart_locator.wait_for(state="visible", timeout=20000)
-                box = await chart_locator.bounding_box()
-                
-                if not box:
-                    logger.warning(f"⚠️ {sid} 无法获取图表布局")
-                    return
+                # 选取最后一个 Canvas（通常是 Navigator）
+                target_canvas = canvases[-1]
+                box = await target_canvas.bounding_box()
+                logger.info(f"📍 [V10 Layout] {sid} 滑块定位: x={box['x']}, y={box['y']}, w={box['width']}, h={box['height']}")
 
-                logger.info(f"📍 [Layout] {sid} 容器定位: x={box['x']}, y={box['y']}, w={box['width']}")
+                # 关键：在 Canvas 的 Y 轴正中心操作，x 轴从右往左猛拉
+                mid_y = box['y'] + box['height'] / 2
+                start_x = box['x'] + box['width'] - 10 # 右侧边缘
+                end_x = box['x'] + 10                 # 左侧边缘
 
-                # 4. 拟人化滑块操作
-                # 根据截图，Navigator 在 Chart 底部，我们取底部向上 15% 的位置
-                drag_y = box['y'] + box['height'] * 0.88 
-                start_x = box['x'] + box['width'] * 0.9  # 右侧手柄
-                end_x = box['x'] + box['width'] * 0.1    # 向左拉到底
-
-                # 模拟真人：先 hover，停顿，再拖拽
-                await page.mouse.move(start_x, drag_y)
-                await asyncio.sleep(random.uniform(0.5, 1.2))
+                # 模拟动作：先点一下激活，再拖拽
+                await page.mouse.click(start_x, mid_y)
+                await asyncio.sleep(0.5)
+                await page.mouse.move(start_x, mid_y)
                 await page.mouse.down()
-                await page.mouse.move(end_x, drag_y, steps=random.randint(60, 100)) # 极慢速平滑拖拽
+                # steps=30 保持足够的速度触发位移监听，但又不过快
+                await page.mouse.move(end_x, mid_y, steps=40)
                 await page.mouse.up()
 
-                # 5. 等待数据回传
-                for _ in range(8):
-                    if captured_payload["data"]: break
+                # 如果没触发，再试一次“反向拉取”
+                if not captured_data["raw"]:
+                    await page.mouse.move(box['x'] + 50, mid_y)
+                    await page.mouse.down()
+                    await page.mouse.move(box['x'] + 200, mid_y, steps=30)
+                    await page.mouse.up()
+
+                # 轮询等待
+                for _ in range(10):
+                    if captured_data["raw"]: break
                     await asyncio.sleep(1)
 
-                if captured_payload["data"]:
-                    klines = captured_payload["data"]
+                if captured_data["raw"]:
+                    klines = captured_data["raw"]
                     batch = [(sid, k.split(',')[0], float(k.split(',')[1]), float(k.split(',')[2]), 
                              float(k.split(',')[3]), float(k.split(',')[4]), float(k.split(',')[5]), float(k.split(',')[6])) 
                             for k in klines]
                     await self.db_queue.put((sid, batch))
                 else:
-                    logger.warning(f"🚫 {sid} 拖拽完成但无流量回传")
+                    # 诊断截图
+                    await page.screenshot(path=f"data/{sid}_v10_fail.png")
+                    logger.warning(f"🚫 {sid} 拖拽尝试结束，仍无全量包")
 
-            except Exception as e:
-                logger.error(f"💥 {sid} 任务异常: {str(e)[:100]}")
-            finally:
-                await page.close()
+            except Exception as e: logger.error(f"💥 {sid} 异常: {str(e)[:50]}")
+            finally: await page.close()
 
     async def run_factory(self, sector_list):
-        logger.info(f"👻 [V9 Stealth Mode] 启动中...")
+        logger.info(f"🚀 [V10] 启动高精度物理探测器...")
         writer = asyncio.create_task(self.db_writer_task())
-        
         async with async_playwright() as p:
-            # 模拟真实的浏览器启动参数
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    '--disable-blink-features=AutomationControlled',
-                    '--use-gl=desktop', # 强制开启 GPU 渲染支持，防止 Canvas 不加载
-                    '--no-sandbox'
-                ]
-            )
-            
-            context = await browser.new_context(
-                viewport={'width': 1280, 'height': 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            )
-            
+            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+            context = await browser.new_context(viewport={'width': 1280, 'height': 800})
             semaphore = asyncio.Semaphore(self.concurrency)
-            tasks = [self.run_stealth_sniffing(context, sid, semaphore) for sid in sector_list]
+            tasks = [self.run_v10_mission(context, sid, semaphore) for sid in sector_list]
             await asyncio.gather(*tasks)
             await browser.close()
-
         await self.db_queue.put(None)
         await writer
-        logger.success(f"🏁 同步结束")
+        logger.success(f"🏁 压测总结 | 成功: {self.stats['success']}")
