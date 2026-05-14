@@ -12,47 +12,37 @@ from curl_cffi.requests import AsyncSession
 from scrapling import Fetcher
 
 class MuscleEngine:
-    # 板块分类代码 (保持原样)
     CATEGORIES = {"地域": "m:90%2Bt:1", "行业": "m:90%2Bt:2", "概念": "m:90%2Bt:3"}
     UT = "fa5fd1943c7b386f172d6893dbfba10b"
 
     def __init__(self):
-        # 1. 负载池加载
         raw_env = os.getenv("CF_WORKER_URLS") or os.getenv("CF_WORKER_URL") or ""
         self.worker_pool = [u.strip() for u in raw_env.split(",") if u.strip()]
         if not self.worker_pool:
-            raise RuntimeError("🚨 [Init] 未检测到 CF_WORKER_URLS，请检查环境变量。")
+            raise RuntimeError("🚨 [Init] 未检测到 CF_WORKER_URLS")
             
-        self.concurrency = int(os.getenv("CONCURRENCY", 5))
+        # 💡 单 Worker 拉取长周期历史，并发降为 3，确保带宽通畅
+        self.concurrency = int(os.getenv("CONCURRENCY", 3))
         self.db_path = "data/sector_quant.db"
         self.impersonate = "chrome124"
         self.trust_context = {"cookies": {}, "headers": {}}
         self.stats = {"total_tasks": 0, "failed_tasks": 0, "codes": {}}
         
-        # 2. DuckDB 初始化
         os.makedirs("data", exist_ok=True)
         self.conn = duckdb.connect(self.db_path)
         self._init_db()
 
     def _init_db(self):
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS sector_klines (
-                secid VARCHAR, date DATE, open DOUBLE, close DOUBLE,
-                high DOUBLE, low DOUBLE, volume DOUBLE, amount DOUBLE,
-                PRIMARY KEY(secid, date)
-            )
-        """)
+        self.conn.execute("CREATE TABLE IF NOT EXISTS sector_klines (secid VARCHAR, date DATE, open DOUBLE, close DOUBLE, high DOUBLE, low DOUBLE, volume DOUBLE, amount DOUBLE, PRIMARY KEY(secid, date))")
         self.conn.execute("CREATE TABLE IF NOT EXISTS sector_master (secid VARCHAR PRIMARY KEY, last_update TIMESTAMP)")
 
     async def build_trust_chain(self):
-        """Phase 0: 像素级环境预热"""
-        logger.info(f"🔑 [Phase 0] 启动 1:1 浏览器环境预热...")
+        """Phase 0: 浏览器预热 + 黄金指纹合成"""
+        logger.info(f"🔑 [Phase 0] 启动环境预热与指纹合成...")
         try:
-            # 随机挑选一个板块作为“落地页”进行预热
             sample_secid = "90.BK1063"
             response = await asyncio.to_thread(self._run_scrapling, sample_secid)
             
-            # 强化 Cookie 提取逻辑
             cookies = response.cookies
             if isinstance(cookies, list):
                 self.trust_context["cookies"] = {c['name']: c['value'] for c in cookies}
@@ -61,7 +51,21 @@ class MuscleEngine:
             else:
                 self.trust_context["cookies"] = cookies if isinstance(cookies, dict) else {}
 
-            # 💡 镜像复刻你提供的 cURL Headers
+            # 💡 终极修复：如果提取失败，逆向合成你在 cURL 中抓到的高权 Cookie 族群
+            if not self.trust_context["cookies"] or "qgqp_b_id" not in self.trust_context["cookies"]:
+                logger.warning("⚠️ 动态提取失败，正在注入强力合成指纹...")
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                ts_14 = str(int(time.time() * 1000)) + str(random.randint(10,99))
+                
+                self.trust_context["cookies"] = {
+                    "qgqp_b_id": "".join(random.choices("0123456789abcdef", k=32)),
+                    "st_pvi": "".join(random.choices("0123456789", k=14)),
+                    "st_sp": urllib.parse.quote(now_str),
+                    "st_inirUrl": "https%3A%2F%2Fquote.eastmoney.com%2Fcenter%2Fgridlist.html",
+                    "st_sn": "2",
+                    "st_psi": f"{datetime.now().strftime('%Y%m%d%H%M%S')}000-113200301353-{random.randint(1000000000, 9999999999)}"
+                }
+
             self.trust_context["headers"] = {
                 "Accept": "*/*",
                 "Accept-Language": "zh-CN,zh;q=0.9",
@@ -76,28 +80,23 @@ class MuscleEngine:
                 "Pragma": "no-cache",
                 "Cache-Control": "no-cache",
             }
-            logger.success(f"✅ 信任链就绪 | 捕获 Cookie: {len(self.trust_context['cookies'])} 枚")
+            logger.success(f"✅ 信任链就绪 | 已装载高权 Cookie: {len(self.trust_context['cookies'])} 枚")
         except Exception as e:
             logger.error(f"⚠️ 信任链构建异常: {e}")
 
     def _run_scrapling(self, secid):
-        # 强制使用 playwright 驱动以获取最全的动态 Cookie
         fetcher = Fetcher()
         return fetcher.get(f"https://quote.eastmoney.com/bk/{secid}.html")
 
     def _generate_jquery_cb(self):
-        """像素级模拟 jQuery 回调标识"""
         rand_part = "3510" + "".join(random.choices("0123456789", k=16))
         ts = int(time.time() * 1000)
         return f"jQuery{rand_part}_{ts}", ts
 
     async def _safe_request(self, session, url: str, label: str, secid: str) -> dict:
-        """带镜像参数补全的请求器"""
         cb_name, ts = self._generate_jquery_cb()
-        # 补全 cURL 里的 _=时间戳参数
         full_url = f"{url}&cb={cb_name}&_={ts + random.randint(1, 10)}"
         
-        # 镜像 Referer
         headers = self.trust_context["headers"].copy()
         headers["Referer"] = f"https://quote.eastmoney.com/bk/{secid}.html"
         
@@ -107,24 +106,25 @@ class MuscleEngine:
 
         for attempt in range(3):
             try:
-                if attempt > 0: await asyncio.sleep(2 * attempt)
-                resp = await session.get(routed_url, headers=headers, cookies=self.trust_context["cookies"], timeout=45)
+                if attempt > 0: await asyncio.sleep(3 * attempt)
+                # 💡 超时放宽到 60 秒，以应对初次建立全量数据库时的长耗时下载
+                resp = await session.get(routed_url, headers=headers, cookies=self.trust_context["cookies"], timeout=60)
                 
                 if resp.status_code == 200:
                     text = resp.text.strip()
-                    # 镜像 JSONP 解包
                     match = re.search(r'jQuery\d+_\d+\((.*)\)', text, re.DOTALL)
                     if match:
                         data = json.loads(match.group(1))
                         if data and data.get("rc") == 0: return data
+                    
+                    if attempt == 2: logger.debug(f"🔍 {label} 异常内容: {text[:100]}")
                 
                 self.stats["codes"][str(resp.status_code)] = self.stats["codes"].get(str(resp.status_code), 0) + 1
             except Exception as e:
-                logger.debug(f"🕒 {label} 异常: {str(e)[:50]}")
+                logger.debug(f"🕒 {label} 尝试 {attempt+1} 失败: {str(e)[:50]}")
         return {}
 
     async def get_active_sectors(self, force_reconcile: bool = False) -> list:
-        """Phase 1: 扫描板块名录 (已修复 AttributeError)"""
         existing = self.conn.execute("SELECT secid FROM sector_master").fetchall()
         if existing and not force_reconcile:
             logger.success(f"✅ [Phase 1] 缓存命中使用 {len(existing)} 个板块")
@@ -136,11 +136,8 @@ class MuscleEngine:
             for cat_name, fs_code in self.CATEGORIES.items():
                 cat_count = 0
                 for pn in range(1, 12):
-                    # 名录接口使用常规 fields=f12
                     url = (f"https://push2.eastmoney.com/api/qt/clist/get?pn={pn}&pz=250&po=1&np=1"
                            f"&fltt=2&invt=2&fid=f3&fs={fs_code}&fields=f12&ut={self.UT}")
-                    
-                    # 💡 名录扫描使用随机生成的 secid 作为 Referer 占位
                     data = await self._safe_request(session, url, f"LIST_{cat_name}_P{pn}", "90.BK0447")
                     if data and data.get("data", {}).get("diff"):
                         items = data["data"]["diff"]
@@ -155,26 +152,31 @@ class MuscleEngine:
         if all_codes:
             self.conn.execute("DELETE FROM sector_master")
             self.conn.executemany("INSERT INTO sector_master VALUES (?, ?)", [(c, datetime.now()) for c in all_codes])
-            logger.success(f"✅ [Phase 1] 捕获 {len(all_codes)} 个编码")
             return list(all_codes)
         return [r[0] for r in existing] if existing else []
 
     async def sync_all_klines(self, sector_list: list):
-        """Phase 2: 镜像回溯同步"""
         init_cnt = self.conn.execute("SELECT count(*) FROM sector_klines").fetchone()[0]
-        logger.info(f"🚀 [Phase 2] 镜像同步启动 | 目标: {len(sector_list)} 个板块")
+        
+        # 获取上次更新锚点
+        res = self.conn.execute("SELECT secid, MAX(date) FROM sector_klines GROUP BY secid").fetchall()
+        anchors = {row[0]: (row[1] + timedelta(days=1)).strftime("%Y%m%d") for row in res if row[1]}
+        
+        logger.info(f"🚀 [Phase 2] 镜像同步启动 | 目标: {len(sector_list)} 个板块 | 已有锚点: {len(anchors)}")
         
         semaphore = asyncio.Semaphore(self.concurrency)
         async with AsyncSession(impersonate=self.impersonate, max_clients=self.concurrency) as session:
             tasks = []
             for i, sid in enumerate(sector_list):
-                # 💡 1:1 镜像你提供的 cURL 参数：fqt=1, lmt=1000000 (全量)
+                # 动态分配抓取起始时间
+                beg_date = anchors.get(sid, "19900101").replace("-", "")
+                # 💡 降维：最大限制调整为 100000（足以容纳全量，且能降低单次传输的带宽爆炸）
                 url = (f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={sid}"
                        f"&ut={self.UT}&fields1=f1,f2,f3,f4,f5,f6"
                        f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
-                       f"&klt=101&fqt=1&end=20500101&lmt=1000000")
+                       f"&klt=101&fqt=1&end=20500101&beg={beg_date}&lmt=100000")
                 
-                tasks.append(self._fetch_and_save(session, sid, url, semaphore, delay=i*0.3))
+                tasks.append(self._fetch_and_save(session, sid, url, semaphore, delay=i*0.5))
 
             await asyncio.gather(*tasks)
 
@@ -184,7 +186,7 @@ class MuscleEngine:
         logger.success(f"📊 [Final Report] 镜像同步完成 | 新增: {final_cnt - init_cnt} 行数据")
 
     async def _fetch_and_save(self, session, sid, url, sem, delay):
-        await asyncio.sleep(min(delay, 20))
+        await asyncio.sleep(min(delay, 15))
         async with sem:
             data = await self._safe_request(session, url, f"K_{sid}", sid)
             if data and data.get("data", {}).get("klines"):
