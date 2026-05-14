@@ -3,7 +3,6 @@ import json
 import os
 import re
 import duckdb
-import random
 from loguru import logger
 from playwright.async_api import async_playwright
 
@@ -31,7 +30,7 @@ class MuscleEngine:
                 self.stats["rows"] += len(batch)
             finally: self.db_queue.task_done()
 
-    async def run_v11_mission(self, context, sid, semaphore):
+    async def run_v12_mission(self, context, sid, semaphore):
         async with semaphore:
             self.stats["total"] += 1
             page = await context.new_page()
@@ -51,48 +50,39 @@ class MuscleEngine:
 
             try:
                 url = f"https://quote.eastmoney.com/bk/{sid}.html"
-                # wait_until 使用 load，确保 JS 引擎完全启动
                 await page.goto(url, wait_until="load", timeout=60000)
                 
-                # 1. 寻找主 K 线 Canvas（面积最大的那个）
-                canvases = await page.locator("canvas").all()
-                main_canvas = None
-                max_area = 0
-                for c in canvases:
-                    box = await c.bounding_box()
-                    if box and (box['width'] * box['height'] > max_area):
-                        max_area = box['width'] * box['height']
-                        main_canvas = c
+                # 1. 寻找核心 DOM 元素：左侧拖拽手柄
+                # 根据截图，Class 是 .__sb_left
+                left_handle = page.locator(".__sb_left")
                 
-                if not main_canvas:
-                    logger.warning(f"⚠️ {sid} 未发现有效图表")
-                    return
+                # 2. 确保手柄已经加载并可见
+                try:
+                    await left_handle.wait_for(state="visible", timeout=15000)
+                    logger.info(f"✅ [V12] {sid} 发现滑块手柄，准备拖拽...")
+                except:
+                    logger.warning(f"⚠️ {sid} 未发现 .__sb_left 手柄，尝试备选按钮...")
+                    # 备选：点击“拉长线”按钮
+                    long_btn = page.get_by_text("拉长线")
+                    if await long_btn.is_visible():
+                        await long_btn.click()
+                    else:
+                        return
 
-                # 2. 核心步骤：将图表滚动到视口中央，确保坐标在 0-800 之间
-                await main_canvas.scroll_into_view_if_needed()
-                await asyncio.sleep(1) # 等待滚动平稳
+                # 3. 执行 DOM 级别的拖拽
+                # 获取手柄位置
+                box = await left_handle.bounding_box()
+                if box:
+                    # 从当前手柄位置按住，往左拖 400 像素
+                    await page.mouse.move(box['x'] + box['width']/2, box['y'] + box['height']/2)
+                    await page.mouse.down()
+                    await page.mouse.move(box['x'] - 400, box['y'] + box['height']/2, steps=50)
+                    await page.mouse.up()
                 
-                # 3. 重新获取滚动后的物理坐标
-                box = await main_canvas.bounding_box()
-                logger.info(f"📍 [V11 Layout] {sid} 视口内坐标: x={box['x']}, y={box['y']}, w={box['width']}, h={box['height']}")
-
-                # 4. 精准计算滑块位置 (在 Canvas 底部边缘向上 20 像素处)
-                # 这个位置通常是 Navigator 的操作手柄
-                drag_y = box['y'] + box['height'] - 25 
-                start_x = box['x'] + box['width'] - 30 # 右侧手柄
-                end_x = box['x'] + 30                 # 左侧终点
-
-                # 5. 执行物理模拟
-                await page.mouse.move(start_x, drag_y)
-                await page.mouse.down()
-                # 匀速拖拽，模拟人类“拉历史”的行为
-                await page.mouse.move(end_x, drag_y, steps=60)
-                await page.mouse.up()
-
-                # 6. 等待截流
-                for _ in range(12):
+                # 4. 轮询截获
+                for _ in range(10):
                     if captured_data["raw"]:
-                        logger.success(f"🎯 [V11] {sid} 物理劫持成功！")
+                        logger.success(f"🎯 [V12] {sid} 劫持成功！获取到数据")
                         break
                     await asyncio.sleep(1)
 
@@ -103,20 +93,19 @@ class MuscleEngine:
                             for k in klines]
                     await self.db_queue.put((sid, batch))
                 else:
-                    logger.warning(f"🚫 {sid} 拖拽点 y={drag_y:.0f} (视口内)，但未捕获请求")
+                    logger.warning(f"🚫 {sid} 拖拽已执行，但未嗅探到全量包")
 
-            except Exception as e: logger.error(f"💥 {sid} 异常: {str(e)[:50]}")
+            except Exception as e: logger.error(f"💥 {sid} 任务失败: {str(e)[:50]}")
             finally: await page.close()
 
     async def run_factory(self, sector_list):
-        logger.info(f"🚀 [V11] 启动视口对齐探测器...")
+        logger.info(f"🚀 [V12 DOM Edition] 启动...")
         writer = asyncio.create_task(self.db_writer_task())
         async with async_playwright() as p:
-            # 开启软件 GPU 模拟，确保 Headless 下 Canvas 渲染正常
-            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage', '--use-gl=desktop'])
+            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
             context = await browser.new_context(viewport={'width': 1280, 'height': 800})
             semaphore = asyncio.Semaphore(self.concurrency)
-            tasks = [self.run_v11_mission(context, sid, semaphore) for sid in sector_list]
+            tasks = [self.run_v12_mission(context, sid, semaphore) for sid in sector_list]
             await asyncio.gather(*tasks)
             await browser.close()
         await self.db_queue.put(None)
