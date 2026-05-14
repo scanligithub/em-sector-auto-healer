@@ -1,4 +1,5 @@
 import asyncio
+import os
 from loguru import logger
 from core.muscle_engine import MuscleEngine
 from dotenv import load_dotenv
@@ -6,20 +7,18 @@ from dotenv import load_dotenv
 load_dotenv()
 
 async def main():
-    logger.info("🧪 进入压力测试模式 - 全量 JSONP 注入劫持")
+    logger.info("🧪 启动 V8-Pro 行为劫持压测...")
     engine = MuscleEngine()
     
-    # 模拟板块名录（测试时可以填入 100+ 个板块观察性能）
-    # 在实际压测中，你可以通过 engine.conn.execute(...) 读入完整的 400+ 板块
-    sector_list = [
-        "90.BK1063", "90.BK0447", "90.BK0473", "90.BK1026", 
-        "90.BK1037", "90.BK0456", "90.BK0420", "90.BK0475",
-        "90.BK0733", "90.BK0814", "90.BK1071", "90.BK0434",
-        "90.BK1073", "90.BK0171", "90.BK1048", "90.BK1672"
-    ]
+    # 填入你想要测试的板块 ID
+    sector_list = ["90.BK1063", "90.BK0447", "90.BK0473", "90.BK1026", "90.BK1037"]
     
-    # 执行压力同步
+    # 在正式环境中，这里可以从数据库获取全量 400+ 板块
+    # sector_list = await engine.get_all_sector_ids() 
+
     await engine.run_factory(sector_list)
 
 if __name__ == "__main__":
+    # 强制设置并发为 1 以保证探测精度，稳定后可适度调至 2
+    os.environ["CONCURRENCY"] = "1"
     asyncio.run(main())
