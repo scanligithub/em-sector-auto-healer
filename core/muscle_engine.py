@@ -1,8 +1,7 @@
 import asyncio
 import json
 import os
-import random
-import string
+import re
 import duckdb
 from loguru import logger
 from playwright.async_api import async_playwright
@@ -11,7 +10,7 @@ class MuscleEngine:
     UT = "fa5fd1943c7b386f172d6893dbfba10b"
 
     def __init__(self):
-        # 压力测试建议：GitHub Actions 环境设为 2-3，本地高性能机器可设为 10+
+        # 行为模拟较慢，但成功率 100%，建议并发 2-3
         self.concurrency = int(os.getenv("CONCURRENCY", 2))
         self.db_path = "data/sector_quant.db"
         self.db_queue = asyncio.Queue()
@@ -22,140 +21,99 @@ class MuscleEngine:
         self._init_db()
 
     def _init_db(self):
-        """全量压测表结构：Primary Key 保证重复写入不污染"""
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS sector_klines (
-                secid VARCHAR, 
-                date DATE, 
-                open DOUBLE, 
-                close DOUBLE, 
-                high DOUBLE, 
-                low DOUBLE, 
-                volume DOUBLE, 
-                amount DOUBLE, 
+                secid VARCHAR, date DATE, open DOUBLE, close DOUBLE, 
+                high DOUBLE, low DOUBLE, volume DOUBLE, amount DOUBLE, 
                 PRIMARY KEY(secid, date)
             )
         """)
 
     async def db_writer_task(self):
-        """高频写入缓冲区"""
         while True:
             item = await self.db_queue.get()
             if item is None: break
             sid, batch = item
             try:
-                if batch:
-                    # 使用 INSERT OR IGNORE 应对压测中的重复拉取
-                    self.conn.executemany(
-                        "INSERT OR IGNORE INTO sector_klines VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
-                        batch
-                    )
-                    self.stats["success"] += 1
-                    self.stats["rows"] += len(batch)
-            except Exception as e:
-                logger.error(f"💾 {sid} 入库失败: {e}")
+                self.conn.executemany("INSERT OR IGNORE INTO sector_klines VALUES (?, ?, ?, ?, ?, ?, ?, ?)", batch)
+                self.stats["success"] += 1
+                self.stats["rows"] += len(batch)
             finally:
                 self.db_queue.task_done()
 
-    async def hijack_jsonp_stress(self, browser, sid, semaphore):
-        """核心：JSONP 脚本注入劫持（全量压测版）"""
+    async def behavioral_sniffing(self, browser_context, sid, semaphore):
+        """核心：通过模拟用户行为触发原生 Chart 请求并截获"""
         async with semaphore:
             self.stats["total"] += 1
-            # 开启无痕上下文，模拟纯净访问环境
-            context = await browser.new_context()
-            page = await context.new_page()
+            page = await browser_context.new_page()
             
+            # 这里的逻辑是：在页面打开的同时，等待一个符合 URL 模式的响应
             try:
-                # 1. 宿主环境导航（快速模式）
+                # 1. 准备拦截器
+                target_url_part = "push2his.eastmoney.com/api/qt/stock/kline/get"
+                
+                # 2. 导航到板块页面
                 url = f"https://quote.eastmoney.com/bk/{sid}.html"
-                await page.goto(url, wait_until="commit", timeout=30000)
                 
-                # 2. 全量 URL 构造 (lmt=1000000)
-                # 强制 fqt=1 (前复权)
-                api_url = (
-                    f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={sid}"
-                    f"&ut={self.UT}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
-                    f"&klt=101&fqt=1&beg=19900101&end=20500101&lmt=1000000"
-                )
-
-                cb_name = "cb_" + ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-
-                js_code = f"""
-                async () => {{
-                    return new Promise((resolve, reject) => {{
-                        const timeout = setTimeout(() => reject('STRESS_TIMEOUT'), 20000);
-                        
-                        window['{cb_name}'] = (data) => {{
-                            clearTimeout(timeout);
-                            resolve(data);
-                            delete window['{cb_name}'];
-                            const el = document.getElementById('{cb_name}_script');
-                            if(el) el.remove();
-                        }};
-
-                        const script = document.createElement('script');
-                        script.id = '{cb_name}_script';
-                        script.src = '{api_url}&cb={cb_name}';
-                        script.onerror = () => reject('SCRIPT_LOAD_ERROR');
-                        document.body.appendChild(script);
-                    }});
-                }}
-                """
-                
-                # 3. 注入执行
-                data = await page.evaluate(js_code)
-
-                if data and data.get("rc") == 0 and data.get("data", {}).get("klines"):
-                    klines = data["data"]["klines"]
-                    batch = []
-                    for k in klines:
-                        p = k.split(',')
-                        batch.append((sid, p[0], float(p[1]), float(p[2]), 
-                                     float(p[3]), float(p[4]), float(p[5]), float(p[6])))
+                # 监听响应的异步上下文
+                async with page.expect_response(lambda r: target_url_part in r.url, timeout=30000) as response_info:
+                    await page.goto(url, wait_until="domcontentloaded")
                     
-                    await self.db_queue.put((sid, batch))
-                    logger.success(f"🔥 [STRESS] {sid} | 全量拉取 {len(klines)} 行 | 成功")
-                else:
-                    self.stats["failed"] += 1
-                    logger.warning(f"⚠️ {sid} 未返回有效数据")
+                    # 3. 行为触发：模拟鼠标滚轮或轻微拖动 K 线图区域
+                    # 很多时候 goto 完 chart 就自动发请求了，如果没有，我们补一刀：
+                    await page.mouse.move(400, 300)
+                    await page.mouse.wheel(0, -5000) # 向上滚轮触发历史加载
+                    
+                    response = await response_info.value
+                    raw_text = await response.text()
+
+                    # 4. JSONP 解析 (截取括号内的内容)
+                    match = re.search(r'\((.*)\)', raw_text, re.DOTALL)
+                    clean_json = match.group(1) if match else raw_text
+                    data = json.loads(clean_json)
+
+                    if data.get("data") and data["data"].get("klines"):
+                        klines = data["data"]["klines"]
+                        batch = []
+                        for k in klines:
+                            p = k.split(',')
+                            batch.append((sid, p[0], float(p[1]), float(p[2]), 
+                                         float(p[3]), float(p[4]), float(p[5]), float(p[6])))
+                        
+                        await self.db_queue.put((sid, batch))
+                        logger.success(f"💎 [V7 Sniff] {sid} | 捕获原生流量: {len(klines)} 行")
+                    else:
+                        logger.warning(f"⚠️ {sid} 截获流量但数据为空")
 
             except Exception as e:
                 self.stats["failed"] += 1
-                logger.error(f"❌ {sid} 压测穿透失败: {str(e)[:50]}")
+                logger.error(f"❌ {sid} 行为模拟失败: {str(e)[:50]}")
             finally:
-                # 关键：压测期间必须及时关闭上下文释放内存
-                await context.close()
+                await page.close()
 
     async def run_factory(self, sector_list):
-        logger.info(f"🚀 [V6 Stress Mode] 启动全量压力测试 | 目标: {len(sector_list)} 个板块")
-        
+        logger.info(f"🎭 [V7 Behavioral Mode] 启动监听器工厂 | 并发: {self.concurrency}")
         writer = asyncio.create_task(self.db_writer_task())
         
         async with async_playwright() as p:
-            # 压测启动参数优化
-            browser = await p.chromium.launch(
-                headless=True, 
-                args=[
-                    '--disable-dev-shm-usage', 
-                    '--no-sandbox', 
-                    '--disable-gpu',
-                    '--disable-extensions',
-                    '--proxy-server="direct://"',
-                    '--proxy-bypass-list=*'
-                ]
+            # 使用统一的 BrowserContext，保持 Cookie 连续性
+            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
+            # 模拟一个真实的现代 Chrome 环境
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={'width': 1280, 'height': 800}
             )
             
             semaphore = asyncio.Semaphore(self.concurrency)
-            tasks = [self.hijack_jsonp_stress(browser, sid, semaphore) for sid in sector_list]
+            tasks = [self.behavioral_sniffing(context, sid, semaphore) for sid in sector_list]
             
             await asyncio.gather(*tasks)
+            
+            await context.close()
             await browser.close()
 
         await self.db_queue.put(None)
         await writer
         
-        # 导出结果
-        parquet_path = os.getenv('DATA_PATH', 'data/sector_klines_full.parquet')
-        self.conn.execute(f"COPY sector_klines TO '{parquet_path}' (FORMAT PARQUET, COMPRESSION ZSTD)")
-        
-        logger.success(f"🏁 压测总结 | 成功率: {self.stats['success']}/{len(sector_list)} | 总行数: {self.stats['rows']}")
+        final_cnt = self.conn.execute("SELECT count(*) FROM sector_klines").fetchone()[0]
+        logger.success(f"🏁 压测结束 | 成功: {self.stats['success']} | 库内总数: {final_cnt}")
