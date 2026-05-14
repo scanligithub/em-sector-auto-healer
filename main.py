@@ -1,5 +1,4 @@
 import asyncio
-import sys
 from loguru import logger
 from core.muscle_engine import MuscleEngine
 from dotenv import load_dotenv
@@ -7,25 +6,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 async def main():
-    logger.info("🚀 [Nitro V5.0] 极速异步队列版启动")
+    logger.info("🎭 [Quant Interceptor] 浏览器流量劫持模式启动")
     engine = MuscleEngine()
     
-    await engine.build_trust_chain()
+    # 1. 获取名录
+    sector_list = await engine.get_active_sectors()
     
-    sector_list = await engine.get_active_sectors(force_reconcile=True)
-    
-    if sector_list:
-        await engine.sync_all_klines(sector_list)
-        
-        total = engine.stats.get('total_tasks', 0)
-        failed = engine.stats.get('failed_tasks', 0)
-        if total > 0:
-            err_rate = (failed / total * 100)
-            logger.info(f"📊 任务统计: 总任务 {total} | 业务失败数 {failed} | 失败率 {err_rate:.1f}% | 状态码分布: {engine.stats['codes']}")
-    else:
-        logger.error("❌ 未能获取板块名录")
+    if not sector_list:
+        # 如果 DB 为空，提供几个测试种子
+        sector_list = ["90.BK1063", "90.BK0447", "90.BK0473"]
+        logger.warning("⚠️ 数据库名录为空，进入种子测试模式")
+
+    # 2. 执行劫持同步
+    await engine.run_factory(sector_list)
 
 if __name__ == "__main__":
-    if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())
