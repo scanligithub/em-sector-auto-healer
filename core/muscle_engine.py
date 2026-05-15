@@ -11,21 +11,21 @@ class MuscleEngine:
 
     async def verify_rendering(self, context, sid):
         page = await context.new_page()
+        screenshot_path = f"data/{sid}_headed_proof.png"
+        
         try:
             url = f"https://quote.eastmoney.com/bk/{sid}.html"
             logger.info(f"🚀 [Headed Test] 正在打开 {sid}...")
             
-            # 必须用 networkidle，东财的 Chart 模块是极其滞后的按需加载
-            await page.goto(url, wait_until="networkidle", timeout=60000)
+            # 【关键修改】：放弃 networkidle，只要 DOM 出来就强行往下走
+            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
             
-            # 暴力等待 15 秒，给足 K 线引擎下载、解析、渲染 Canvas 的时间
-            logger.info(f"⏳ [Headed Test] 页面已加载，死等 15 秒引擎初始化...")
+            logger.info(f"⏳ DOM已就绪，死等 15 秒让东财的 K线JS 慢慢画图...")
             await asyncio.sleep(15)
             
-            # 验证 1：全屏截图取证 (这是最客观的证据)
-            screenshot_path = f"data/{sid}_headed_proof.png"
+            # 验证 1：全屏截图取证
             await page.screenshot(path=screenshot_path, full_page=True)
-            logger.success(f"📸 截图已保存: {screenshot_path}")
+            logger.success(f"📸 正常截图已保存: {screenshot_path}")
 
             # 验证 2：探测那个决定命运的按钮是否存在
             god_btn = page.locator("a:has-text('拉长K线')").first
@@ -34,7 +34,7 @@ class MuscleEngine:
             if is_visible:
                 logger.success(f"🎯 [Bingo!] {sid} 的 '拉长K线' 按钮真实可见！引擎渲染成功！")
             else:
-                logger.warning(f"🚫 [Failed] {sid} 按钮不可见，请检查截图看页面到底长什么样。")
+                logger.warning(f"🚫 [Failed] {sid} 按钮不可见，请下载截图查看真实现场。")
 
             # 验证 3：看看底层的 JS 变量活了没有
             chart_state = await page.evaluate("""
@@ -51,6 +51,12 @@ class MuscleEngine:
 
         except Exception as e:
             logger.error(f"💥 {sid} 崩溃: {e}")
+            # 【关键防御】：如果发生异常，也要强行拍一张“死亡遗照”
+            try:
+                await page.screenshot(path=f"data/{sid}_crash_proof.png")
+                logger.info(f"📸 崩溃现场截图已保存")
+            except:
+                pass
         finally:
             await page.close()
 
