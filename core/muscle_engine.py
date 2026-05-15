@@ -3,13 +3,13 @@ import json
 import os
 import re
 import duckdb
-import random
 from loguru import logger
 from playwright.async_api import async_playwright
 
 class MuscleEngine:
     def __init__(self):
-        self.concurrency = 1
+        # 既然是点击，速度极快，并发可以稍微提高到 2-3
+        self.concurrency = int(os.getenv("CONCURRENCY", 2))
         self.db_path = "data/sector_quant.db"
         self.db_queue = asyncio.Queue()
         self.stats = {"total": 0, "success": 0, "failed": 0, "rows": 0}
@@ -18,7 +18,13 @@ class MuscleEngine:
         self._init_db()
 
     def _init_db(self):
-        self.conn.execute("CREATE TABLE IF NOT EXISTS sector_klines (secid VARCHAR, date DATE, open DOUBLE, close DOUBLE, high DOUBLE, low DOUBLE, volume DOUBLE, amount DOUBLE, PRIMARY KEY(secid, date))")
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS sector_klines (
+                secid VARCHAR, date DATE, open DOUBLE, close DOUBLE, 
+                high DOUBLE, low DOUBLE, volume DOUBLE, amount DOUBLE, 
+                PRIMARY KEY(secid, date)
+            )
+        """)
 
     async def db_writer_task(self):
         while True:
@@ -31,67 +37,47 @@ class MuscleEngine:
                 self.stats["rows"] += len(batch)
             finally: self.db_queue.task_done()
 
-    async def run_v13_mission(self, context, sid, semaphore):
+    async def run_god_mode_mission(self, context, sid, semaphore):
         async with semaphore:
             self.stats["total"] += 1
             page = await context.new_page()
             
-            captured_url = {"url": None}
             captured_data = {"raw": None}
-
             async def handle_response(resp):
-                # 记录所有 push2his 请求，方便诊断
-                if "push2his.eastmoney.com" in resp.url:
-                    captured_url["url"] = resp.url
-                    if "lmt=1000000" in resp.url or "lmt=144" not in resp.url:
-                        try:
-                            text = await resp.text()
-                            match = re.search(r'\((.*)\)', text, re.DOTALL)
-                            data = json.loads(match.group(1) if match else text)
-                            if data.get("data", {}).get("klines"):
-                                captured_data["raw"] = data["data"]["klines"]
-                        except: pass
+                # 嗅探所有 push2his 且包含 lmt=1000000 的包
+                if "push2his.eastmoney.com" in resp.url and "lmt=1000000" in resp.url:
+                    try:
+                        text = await resp.text()
+                        match = re.search(r'\((.*)\)', text, re.DOTALL)
+                        data = json.loads(match.group(1) if match else text)
+                        if data.get("data", {}).get("klines"):
+                            captured_data["raw"] = data["data"]["klines"]
+                    except: pass
 
             page.on("response", handle_response)
 
             try:
                 url = f"https://quote.eastmoney.com/bk/{sid}.html"
-                await page.goto(url, wait_until="load", timeout=60000)
+                # 加载页面，只需要 DOM 就绪即可
+                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                 
-                # 1. 策略 A：点击“拉长线”按钮（最高优先级）
-                # 根据截图，该按钮通常包含“拉长线”文本
-                logger.info(f"🖱️ [V13] {sid} 尝试点击‘拉长线’按钮...")
-                try:
-                    # 使用文本定位，更稳定
-                    long_btn = page.get_by_text("拉长线")
-                    await long_btn.wait_for(state="visible", timeout=10000)
-                    # 连点 3 次，强制触发历史回溯
-                    for _ in range(3):
-                        await long_btn.click()
-                        await asyncio.sleep(0.5)
-                except:
-                    logger.debug(f"⚠️ {sid} 未发现‘拉长线’按钮，转向滑块操作")
+                # 1. 寻找“上帝开关”：.kzoom 容器下的“拉长K线”按钮
+                god_btn = page.locator(".kzoom a:has-text('拉长K线')")
+                
+                # 2. 等待按钮出现（给图表 JS 一点加载时间）
+                await god_btn.wait_for(state="visible", timeout=15000)
+                
+                # 3. 模拟点击：这是触发全量的物理钥匙
+                # 点击 2 次，确保范围撑到最大
+                await god_btn.click()
+                await asyncio.sleep(0.5)
+                await god_btn.click()
+                logger.info(f"⚡ [GodMode] {sid} 上帝开关已激活 (Clicked)")
 
-                # 2. 策略 B：物理滑块精准操作
-                if not captured_data["raw"]:
-                    left_handle = page.locator(".__sb_left")
-                    if await left_handle.is_visible():
-                        box = await left_handle.bounding_box()
-                        # 起点：手柄中心
-                        sx, sy = box['x'] + box['width']/2, box['y'] + box['height']/2
-                        # 终点：由于 x=350，我们挪到 x=50 (保证在视口内)
-                        tx = 50
-                        
-                        await page.mouse.move(sx, sy)
-                        await page.mouse.down()
-                        await page.mouse.move(tx, sy, steps=100) # 极慢速，模拟拖动过程
-                        await page.mouse.up()
-                        logger.info(f"🖱️ [V13] {sid} 滑块拖拽已执行 (从 {sx:.0f} 到 {tx})")
-
-                # 3. 等待截流
+                # 4. 轮询截流结果
                 for _ in range(10):
                     if captured_data["raw"]:
-                        logger.success(f"🎯 [V13] {sid} 劫持成功！行数: {len(captured_data['raw'])}")
+                        logger.success(f"🎯 [Success] {sid} 劫持成功 | 行数: {len(captured_data['raw'])}")
                         break
                     await asyncio.sleep(1)
 
@@ -102,21 +88,23 @@ class MuscleEngine:
                             for k in klines]
                     await self.db_queue.put((sid, batch))
                 else:
-                    logger.warning(f"🚫 {sid} 失败。最近截获 URL: {captured_url['url']}")
+                    logger.warning(f"🚫 {sid} 点击了按钮但未嗅探到数据包")
 
-            except Exception as e: logger.error(f"💥 {sid} 异常: {str(e)[:100]}")
-            finally: await page.close()
+            except Exception as e:
+                logger.error(f"💥 {sid} 异常: {str(e)[:50]}")
+            finally:
+                await page.close()
 
     async def run_factory(self, sector_list):
-        logger.info(f"🚀 [V13 Final Edition] 启动按钮+拖拽组合探测...")
+        logger.info(f"🏗️ [V13-GodMode] 启动上帝开关数据工厂...")
         writer = asyncio.create_task(self.db_writer_task())
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
             context = await browser.new_context(viewport={'width': 1280, 'height': 800})
             semaphore = asyncio.Semaphore(self.concurrency)
-            tasks = [self.run_v13_mission(context, sid, semaphore) for sid in sector_list]
+            tasks = [self.run_god_mode_mission(context, sid, semaphore) for sid in sector_list]
             await asyncio.gather(*tasks)
             await browser.close()
         await self.db_queue.put(None)
         await writer
-        logger.success(f"🏁 压测总结 | 成功: {self.stats['success']}")
+        logger.success(f"🏁 压测总结 | 成功: {self.stats['success']} | 总行数: {self.stats['rows']}")
