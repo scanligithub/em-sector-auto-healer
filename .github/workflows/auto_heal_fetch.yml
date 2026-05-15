@@ -1,15 +1,13 @@
 name: Sector Fetcher Nitro
 
 on:
-  schedule:
-    - cron: '30 8 * * *'
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  fetch-and-heal:
+  visual-proof:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -21,29 +19,23 @@ jobs:
           python-version: "3.10"
           cache: 'pip'
 
+      # 新增：安装 xvfb 虚拟显示服务
+      - name: Install Xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
       - name: Install Dependencies
         run: |
           pip install -r requirements.txt
           python -m playwright install chromium --with-deps
 
-      - name: Restore Data Warehouse Cache
-        uses: actions/cache@v4
-        with:
-          path: data/sector_quant.db
-          key: sector-db-${{ github.run_id }}
-          restore-keys: sector-db-
+      # 核心：使用 xvfb-run 启动真实的 headed Chromium
+      - name: Run Headed Chromium Verification
+        run: |
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x800x24" python main.py
 
-      - name: Run Engine
-        env:
-          CONCURRENCY: 30
-          CF_WORKER_URLS: ${{ secrets.CF_WORKER_URL }}
-          DATA_PATH: "data/sector_klines_full.parquet"
-        run: python main.py
-
-      - name: Upload Artifacts
+      # 必须上传截图，我们要用眼睛看真相
+      - name: Upload Proof Screenshots
         uses: actions/upload-artifact@v4
         with:
-          name: sector-data-package
-          path: |
-            data/sector_quant.db
-            data/sector_klines_full.parquet
+          name: headless-proof-images
+          path: data/*_headed_proof.png
