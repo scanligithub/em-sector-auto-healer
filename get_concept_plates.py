@@ -56,17 +56,17 @@ def fetch_plates(fs_code, plate_type, name, max_pages=8):
                             "change_percent": item.get("f3"),
                         })
                     
-                    if len(items) < 90 or (total > 0 and len(all_data) >= total):
+                    if len(items) < 90 or len(all_data) >= total > 0:
                         print(f"✅ 【{name}】抓取完成！共 {len(all_data)} 个\n")
                         return all_data
-                    
                     break
-            except:
+            except Exception as e:
                 continue
         
         page += 1
         time.sleep(random.uniform(0.8, 1.6))
     
+    print(f"⚠️ 【{name}】抓取结束（可能不完整）共 {len(all_data)} 个\n")
     return all_data
 
 
@@ -76,19 +76,23 @@ def main():
     
     all_plates = []
     
-    # 1. 概念板块（优先抓取，最重要）
+    # 依次抓取三种板块
     concept_data = fetch_plates("m:90+t:3", "concept", "概念板块", max_pages=8)
     all_plates.extend(concept_data)
     
-    # 2. 行业板块
     industry_data = fetch_plates("m:90+t:2", "industry", "行业板块", max_pages=5)
     all_plates.extend(industry_data)
     
-    # 3. 地域板块
     region_data = fetch_plates("m:90+t:1", "region", "地域板块", max_pages=3)
     all_plates.extend(region_data)
     
     df = pd.DataFrame(all_plates)
+    
+    # 防止空数据导致报错
+    if df.empty:
+        print("❌ 未抓取到任何数据！")
+        return
+    
     df = df.drop_duplicates(subset=['secid']).reset_index(drop=True)
     
     ts = datetime.now().strftime("%Y%m%d_%H%M")
@@ -97,9 +101,18 @@ def main():
     
     print("="*70)
     print("🎉 抓取全部完成！最终统计：")
-    print(df.groupby('type_name').size())
+    
+    if 'type_name' in df.columns:
+        print(df.groupby('type_name').size())
+    else:
+        print("（无 type_name 列）")
+    
     print(f"总计唯一板块: {len(df)} 个")
     print(f"总耗时: {time.time() - start_time:.1f} 秒")
+    
+    # 前10条预览
+    print("\n前10条预览：")
+    print(df.head(10)[["secid", "name", "type_name", "change_percent"]])
 
 
 if __name__ == "__main__":
