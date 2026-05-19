@@ -6,17 +6,18 @@ from datetime import datetime
 
 def fetch_plates(fs_code, plate_type, name, max_pages=8):
     subdomains = ["push2", "12.push2", "13.push2", "20.push2", "27.push2", 
-                  "56.push2", "38.push2", "48.push2"]
+                  "56.push2", "38.push2", "48.push2", "79.push2", "25.push2"]
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://quote.eastmoney.com/center/boardlist.html",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+        "Referer": "https://quote.eastmoney.com/center/boardlist.html#boards2-90",
+        "Accept-Language": "zh-CN,zh;q=0.9",
     }
     
     all_data = []
     page = 1
     
-    print(f"🚀 正在抓取 【{name}】...")
+    print(f"🚀 正在抓取 【{name}】...（当前时段加强模式）")
     
     while page <= max_pages:
         random.shuffle(subdomains)
@@ -37,7 +38,8 @@ def fetch_plates(fs_code, plate_type, name, max_pages=8):
                     "_": int(time.time() * 1000)
                 }
                 
-                resp = requests.get(url, params=params, headers=headers, timeout=15)
+                resp = requests.get(url, params=params, headers=headers, timeout=20)
+                
                 if resp.status_code == 200:
                     data = resp.json()
                     items = data.get("data", {}).get("diff", [])
@@ -56,63 +58,45 @@ def fetch_plates(fs_code, plate_type, name, max_pages=8):
                             "change_percent": item.get("f3"),
                         })
                     
-                    if len(items) < 90 or len(all_data) >= total > 0:
-                        print(f"✅ 【{name}】抓取完成！共 {len(all_data)} 个\n")
+                    if len(items) < 85 or len(all_data) >= total > 0:
+                        print(f"✅ 【{name}】完成！共 {len(all_data)} 个\n")
                         return all_data
                     break
-            except Exception as e:
+            except:
                 continue
         
+        # 当前时段增加等待
+        wait = random.uniform(2.0, 4.5)
+        time.sleep(wait)
         page += 1
-        time.sleep(random.uniform(0.8, 1.6))
     
-    print(f"⚠️ 【{name}】抓取结束（可能不完整）共 {len(all_data)} 个\n")
+    print(f"⚠️ 【{name}】抓取结束，共 {len(all_data)} 个\n")
     return all_data
 
 
 def main():
-    print("=== 开始抓取东方财富全板块（最终稳定版）===\n")
     start_time = time.time()
+    print("=== 加强模式抓取全板块（收盘后专用）===\n")
     
     all_plates = []
     
-    # 依次抓取三种板块
-    concept_data = fetch_plates("m:90+t:3", "concept", "概念板块", max_pages=8)
-    all_plates.extend(concept_data)
-    
-    industry_data = fetch_plates("m:90+t:2", "industry", "行业板块", max_pages=5)
-    all_plates.extend(industry_data)
-    
-    region_data = fetch_plates("m:90+t:1", "region", "地域板块", max_pages=3)
-    all_plates.extend(region_data)
+    all_plates.extend(fetch_plates("m:90+t:3", "concept", "概念板块", 8))
+    all_plates.extend(fetch_plates("m:90+t:2", "industry", "行业板块", 5))
+    all_plates.extend(fetch_plates("m:90+t:1", "region", "地域板块", 3))
     
     df = pd.DataFrame(all_plates)
-    
-    # 防止空数据导致报错
-    if df.empty:
-        print("❌ 未抓取到任何数据！")
-        return
-    
     df = df.drop_duplicates(subset=['secid']).reset_index(drop=True)
     
     ts = datetime.now().strftime("%Y%m%d_%H%M")
     df.to_csv(f"全板块列表_{ts}.csv", index=False, encoding="utf-8-sig")
     df.to_csv("全板块列表_最新.csv", index=False, encoding="utf-8-sig")
     
-    print("="*70)
-    print("🎉 抓取全部完成！最终统计：")
-    
+    print("="*60)
+    print("最终统计：")
     if 'type_name' in df.columns:
         print(df.groupby('type_name').size())
-    else:
-        print("（无 type_name 列）")
-    
     print(f"总计唯一板块: {len(df)} 个")
     print(f"总耗时: {time.time() - start_time:.1f} 秒")
-    
-    # 前10条预览
-    print("\n前10条预览：")
-    print(df.head(10)[["secid", "name", "type_name", "change_percent"]])
 
 
 if __name__ == "__main__":
