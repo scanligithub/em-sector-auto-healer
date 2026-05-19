@@ -1,0 +1,37 @@
+name: 更新东方财富概念板块列表
+
+on:
+  schedule:
+    - cron: '30 2 * * *'        # 北京时间每天上午10:30运行（UTC 2:30）
+  workflow_dispatch:            # 支持手动触发
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pandas openpyxl
+      
+      - name: 运行抓取脚本
+        run: python get_concept_plates.py
+      
+      - name: 提交更新文件
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add 概念板块列表_*.csv 概念板块列表_*.xlsx 概念板块列表_最新.*
+          git commit -m "📊 更新概念板块列表 $(date '+%Y-%m-%d %H:%M')" || echo "No changes to commit"
+          git push
