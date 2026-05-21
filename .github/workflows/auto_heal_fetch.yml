@@ -26,14 +26,14 @@ jobs:
 
       - name: Run Cloud Benchmark
         env:
-          DATA_LIMIT: 100
-          MAX_SECTORS: 100
+          DATA_LIMIT: 1000000  # 【修改点】 1000000 代表获取全部历史数据
+          MAX_SECTORS: 100     # 云端批量同步板块上限
         run: |
           python main.py
 
-      # 将 Actions 抓取到的 100 个板块数据打包上传，便于人工在线校验和数据留存
+      # 打包上传抓取到的全量历史 JSON 数据压缩包
       - name: Upload Intercepted Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: cloud-sector-jsons
+          name: cloud-sector-full-history-jsons
           path: data/*_direct.json
