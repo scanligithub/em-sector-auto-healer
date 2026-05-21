@@ -7,7 +7,7 @@ permissions:
   contents: write
 
 jobs:
-  fetch-api-data:
+  cloud-api-bench:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -24,12 +24,16 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install chromium --with-deps
 
-      - name: Run Async Fetcher
+      - name: Run Cloud Benchmark
+        env:
+          DATA_LIMIT: 100
+          MAX_SECTORS: 100
         run: |
           python main.py
 
-      - name: Upload Data Artifacts
+      # 将 Actions 抓取到的 100 个板块数据打包上传，便于人工在线校验和数据留存
+      - name: Upload Intercepted Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: sector-kline-json-data
-          path: data/*_history.json
+          name: cloud-sector-jsons
+          path: data/*_direct.json
