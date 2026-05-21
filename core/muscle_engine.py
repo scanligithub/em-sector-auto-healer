@@ -7,7 +7,7 @@ from loguru import logger
 from playwright.async_api import async_playwright
 
 class MuscleEngine:
-    def __init__(self, data_limit: int = 100):
+    def __init__(self, data_limit: int = 1000000):
         self.output_dir = "data"
         os.makedirs(self.output_dir, exist_ok=True)
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -89,7 +89,7 @@ class MuscleEngine:
         logger.info("🧪 启动云端 headless 无头浏览器数据吞吐管线...")
         
         async with async_playwright() as p:
-            # 启动无头浏览器，注入防止内存崩溃的优化参数
+            # 启动无头浏览器
             browser = await p.chromium.launch(
                 headless=True, 
                 args=[
@@ -118,7 +118,6 @@ class MuscleEngine:
             logger.info("⏳ 正在进行全局会话 Cookie 预热（穿透测试的关键起点）...")
             warmup_page = await context.new_page()
             try:
-                # 访问列表第一个板块的 HTML 页面，强制生成基本 Cookie 凭证
                 await warmup_page.goto(
                     f"https://quote.eastmoney.com/bk/{sectors[0]['sid']}.html", 
                     wait_until="domcontentloaded", 
@@ -131,7 +130,7 @@ class MuscleEngine:
             finally:
                 await warmup_page.close()
             
-            # 启动计时
+            # 开始计时
             start_time = time.time()
             success_count = 0
             
@@ -141,8 +140,10 @@ class MuscleEngine:
                 name = item["name"]
                 
                 if i > 0:
-                    # 引入随机人类抖动，防止频次检测
-                    delay = random.uniform(1.2, 2.5)
+                    # 【核心修改：自适应控流逻辑】
+                    # 如果获取全部历史数据（data_limit > 1000），使用更稳健的 2.0s ~ 3.5s 保护频次
+                    # 如果是增量日常同步（data_limit <= 1000），使用更紧凑的 1.2s ~ 2.5s 提高速度
+                    delay = random.uniform(2.0, 3.5) if self.data_limit > 1000 else random.uniform(1.2, 2.5)
                     await asyncio.sleep(delay)
                 
                 res = await self.fetch_sector_api(context, sid, name)
