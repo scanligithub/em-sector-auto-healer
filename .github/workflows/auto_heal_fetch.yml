@@ -7,7 +7,7 @@ permissions:
   contents: write
 
 jobs:
-  visual-proof:
+  fetch-api-data:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -19,23 +19,17 @@ jobs:
           python-version: "3.10"
           cache: 'pip'
 
-      # 新增：安装 xvfb 虚拟显示服务
-      - name: Install Xvfb
-        run: sudo apt-get update && sudo apt-get install -y xvfb
-
       - name: Install Dependencies
         run: |
           pip install -r requirements.txt
-          python -m playwright install chromium --with-deps
 
-      # 核心：使用 xvfb-run 启动真实的 headed Chromium
-      - name: Run Headed Chromium Verification
+      - name: Run Async Fetcher
         run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1280x800x24" python main.py
+          python main.py
 
-      # 必须上传截图，我们要用眼睛看真相
-      - name: Upload Proof Screenshots
+      # 将生成的全量 K 线 JSON 压缩打包，便于直接在浏览器下载验证数据完整性
+      - name: Upload Data Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: headless-proof-images
-          path: data/*_headed_proof.png
+          name: sector-kline-json-data
+          path: data/*_history.json
