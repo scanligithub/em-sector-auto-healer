@@ -12,7 +12,7 @@ async def main():
     # 压测限制参数（可按需调大）：
     # 模式 A: 100 (默认) -> 增量日常同步（速度快，对云端 IP 极度安全稳定）
     # 模式 B: 1000000    -> 历史全量建库
-    DATA_LIMIT = int(os.environ.get("DATA_LIMIT", "100"))
+    DATA_LIMIT = int(os.environ.get("DATA_LIMIT", "1000000"))
     
     # 本次 Actions 批量压测的板块上限
     MAX_SECTORS = int(os.environ.get("MAX_SECTORS", "100"))
