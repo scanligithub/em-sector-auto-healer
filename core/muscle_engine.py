@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import random
 from loguru import logger
 from playwright.async_api import async_playwright
 
@@ -24,7 +25,7 @@ class MuscleEngine:
         try:
             logger.info(f"🚀 [API 请求] 正在拉取 {sid}...")
             
-            # 显式补全标准的浏览器 Header 报文，与常规请求无异
+            # 发起请求。由于 context 已预热，此处的 get 请求将自动携带合法的浏览器 Cookies
             response = await context.request.get(url, headers={
                 "Accept": "*/*",
                 "Accept-Encoding": "gzip, deflate, br",
@@ -68,25 +69,46 @@ class MuscleEngine:
             return False
 
     async def run_factory(self, sector_list):
-        logger.info(f"🔬 启动安全脱敏的浏览器网络栈代理引擎...")
+        logger.info(f"🔬 启动安全脱敏与会话预热的浏览器网络栈代理引擎...")
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
                 args=['--no-sandbox', '--disable-dev-shm-usage']
             )
             
-            # 【核心修改】：在创建上下文时，强行抹除 HeadlessChrome 痕迹，伪装成标准 Windows 桌面版 Chrome
+            # 伪装成标准的 Windows 桌面端 Chrome 浏览器
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                 locale="zh-CN",
                 timezone_id="Asia/Shanghai"
             )
             
+            # =================【核心优化：会话 Cookie 预热】=================
+            logger.info("⏳ 正在进行全局会话 Cookie 预热（模拟首次真人访问）...")
+            warmup_page = await context.new_page()
+            try:
+                # 访问东财板块主页，让 WAF 写入合法的全局会话 Cookie
+                await warmup_page.goto(
+                    "https://quote.eastmoney.com/bk/90.BK1063.html", 
+                    wait_until="domcontentloaded", 
+                    timeout=30000
+                )
+                # 给浏览器充足的时间完成 Cookie 的写入与稳定
+                await asyncio.sleep(2.0)
+                logger.success("🔑 Cookie 会话预热成功，已获取合法浏览器凭证。")
+            except Exception as e:
+                logger.warning(f"⚠️ 会话预热超时或失败 (将尝试裸请求): {e}")
+            finally:
+                await warmup_page.close()
+            # ===============================================================
+            
             results = []
             for i, sid in enumerate(sector_list):
                 if i > 0:
-                    # 温和的请求间隔
-                    await asyncio.sleep(0.5)
+                    # 引入 1.5s 到 3s 之间的随机人类抖动延迟，打破固定频率特征
+                    delay = random.uniform(1.5, 3.0)
+                    logger.info(f"💤 随机静默 {delay:.2f} 秒以模拟人类行为节奏...")
+                    await asyncio.sleep(delay)
                 
                 res = await self.fetch_sector_kline(context, sid)
                 results.append(res)
