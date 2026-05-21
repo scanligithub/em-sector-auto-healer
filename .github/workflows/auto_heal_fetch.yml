@@ -22,12 +22,12 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install -r requirements.txt
+          python -m playwright install chromium --with-deps
 
       - name: Run Async Fetcher
         run: |
           python main.py
 
-      # 将生成的全量 K 线 JSON 压缩打包，便于直接在浏览器下载验证数据完整性
       - name: Upload Data Artifacts
         uses: actions/upload-artifact@v4
         with:
