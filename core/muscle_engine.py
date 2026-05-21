@@ -2,14 +2,52 @@ import asyncio
 import json
 import os
 import random
+import time
 from loguru import logger
 from playwright.async_api import async_playwright
 
 class MuscleEngine:
-    def __init__(self):
-        os.makedirs("data", exist_ok=True)
+    def __init__(self, data_limit: int = 100):
+        self.output_dir = "data"
+        os.makedirs(self.output_dir, exist_ok=True)
+        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        self.data_limit = data_limit
 
-    async def fetch_sector_kline(self, context, sid: str) -> bool:
+    async def get_active_sectors(self, context) -> list:
+        """
+        从东财行情中心实时获取当前交易排名前 100 的行业板块
+        """
+        logger.info("📡 [CI 准备] 正在从数据源在线获取前 100 个活跃行业板块列表...")
+        page = await context.new_page()
+        list_url = (
+            "https://push2.eastmoney.com/api/qt/clist/get"
+            "?pn=1&pz=100&po=1&np=1"
+            "&ut=bd1d9ddb04089700cf9c27f6f7426281"
+            "&fltt=2&invt=2&fid=f3&fs=m:90+t:2+f:!12&fields=f12,f14"
+        )
+        try:
+            await page.goto(list_url, wait_until="domcontentloaded", timeout=20000)
+            raw_text = await page.evaluate("() => document.body.innerText")
+            list_data = json.loads(raw_text)
+            sector_items = list_data.get("data", {}).get("diff", [])
+            
+            sectors = []
+            for item in sector_items:
+                code = item.get("f12")
+                name = item.get("f14")
+                if code and name:
+                    sectors.append({"sid": f"90.{code}", "name": name})
+            
+            logger.success(f"✅ 在线板块列表加载成功，共获取到 {len(sectors)} 个板块。")
+            return sectors
+        except Exception as e:
+            logger.error(f"💥 动态获取板块列表失败 (转为降级备用列表): {e}")
+            return [{"sid": "90.BK1063", "name": "重组蛋白"}]
+        finally:
+            await page.close()
+
+    async def fetch_sector_api(self, context, sid: str, name: str) -> bool:
+        page = await context.new_page()
         url = (
             f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
             f"?secid={sid}"
@@ -19,101 +57,118 @@ class MuscleEngine:
             f"&klt=101"
             f"&fqt=1"
             f"&end=20500101"
-            f"&lmt=1000000"
+            f"&lmt={self.data_limit}"
         )
         
         try:
-            logger.info(f"🚀 [API 请求] 正在拉取 {sid}...")
-            
-            # 发起请求。由于 context 已预热，此处的 get 请求将自动携带合法的浏览器 Cookies
-            response = await context.request.get(url, headers={
-                "Accept": "*/*",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Accept-Language": "zh-CN,zh;q=0.9",
-                "Referer": "https://quote.eastmoney.com/",
-                "Connection": "keep-alive"
-            })
-            
-            if response.status != 200:
-                logger.error(f"❌ {sid} 接口请求失败，HTTP 状态码: {response.status}")
-                return False
-                
-            data_json = await response.json()
+            # 浏览器静默导航至目标 API 网页
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            raw_text = await page.evaluate("() => document.body.innerText")
+            data_json = json.loads(raw_text)
             
             if not data_json or "data" not in data_json or data_json["data"] is None:
-                logger.warning(f"⚠️ 板块 {sid} 未返回有效内容")
                 return False
                 
             payload = data_json["data"]
-            name = payload.get("name", "未知")
-            code = payload.get("code", "未知")
-            dktotal = payload.get("dktotal", 0)
             klines = payload.get("klines", [])
             
-            logger.success(
-                f"🎯 [数据就绪] 板块: {name} ({code}) | "
-                f"历史天数: {dktotal} | "
-                f"实际拉取记录数: {len(klines)}"
-            )
-            
-            output_path = f"data/{sid}_history.json"
+            # 以紧凑 JSON 格式落地
+            output_path = os.path.join(self.output_dir, f"{sid}_direct.json")
             with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=4)
-            
-            if klines:
-                logger.info(f"📊 样本数据检验 -> [首条] {klines[0]} | [末条] {klines[-1]}")
+                json.dump(payload, f, ensure_ascii=False)
+                
+            logger.success(f"🎯 [完成] 板块: {name} ({sid}) | 实拉记录数: {len(klines)}")
             return True
             
-        except Exception as e:
-            logger.error(f"💥 数据拉取或解析异常 ({sid}): {e}")
+        except Exception:
             return False
+        finally:
+            await page.close()
 
-    async def run_factory(self, sector_list):
-        logger.info(f"🔬 启动安全脱敏与会话预热的浏览器网络栈代理引擎...")
+    async def run_factory(self, max_sectors: int = 100):
+        logger.info("🧪 启动云端 headless 无头浏览器数据吞吐管线...")
+        
         async with async_playwright() as p:
+            # 启动无头浏览器，注入防止内存崩溃的优化参数
             browser = await p.chromium.launch(
-                headless=True,
-                args=['--no-sandbox', '--disable-dev-shm-usage']
+                headless=True, 
+                args=[
+                    '--no-sandbox', 
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu'
+                ]
             )
             
-            # 伪装成标准的 Windows 桌面端 Chrome 浏览器
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                user_agent=self.user_agent,
+                viewport={"width": 800, "height": 600},
                 locale="zh-CN",
                 timezone_id="Asia/Shanghai"
             )
             
-            # =================【核心优化：会话 Cookie 预热】=================
-            logger.info("⏳ 正在进行全局会话 Cookie 预热（模拟首次真人访问）...")
+            # 获取交易板块
+            sectors_all = await self.get_active_sectors(context)
+            sectors = sectors_all[:max_sectors]
+            
+            if not sectors:
+                await browser.close()
+                return
+            
+            # 会话凭证预热
+            logger.info("⏳ 正在进行全局会话 Cookie 预热（穿透测试的关键起点）...")
             warmup_page = await context.new_page()
             try:
-                # 访问东财板块主页，让 WAF 写入合法的全局会话 Cookie
+                # 访问列表第一个板块的 HTML 页面，强制生成基本 Cookie 凭证
                 await warmup_page.goto(
-                    "https://quote.eastmoney.com/bk/90.BK1063.html", 
+                    f"https://quote.eastmoney.com/bk/{sectors[0]['sid']}.html", 
                     wait_until="domcontentloaded", 
-                    timeout=30000
+                    timeout=25000
                 )
-                # 给浏览器充足的时间完成 Cookie 的写入与稳定
                 await asyncio.sleep(2.0)
-                logger.success("🔑 Cookie 会话预热成功，已获取合法浏览器凭证。")
+                logger.success("🔑 Cookie 预热执行完毕，会话凭证已在上下文中同步。")
             except Exception as e:
-                logger.warning(f"⚠️ 会话预热超时或失败 (将尝试裸请求): {e}")
+                logger.warning(f"⚠️ 会话预热遇到阻碍: {e}")
             finally:
                 await warmup_page.close()
-            # ===============================================================
             
-            results = []
-            for i, sid in enumerate(sector_list):
+            # 启动计时
+            start_time = time.time()
+            success_count = 0
+            
+            # 顺序采集
+            for i, item in enumerate(sectors):
+                sid = item["sid"]
+                name = item["name"]
+                
                 if i > 0:
-                    # 引入 1.5s 到 3s 之间的随机人类抖动延迟，打破固定频率特征
-                    delay = random.uniform(1.5, 3.0)
-                    logger.info(f"💤 随机静默 {delay:.2f} 秒以模拟人类行为节奏...")
+                    # 引入随机人类抖动，防止频次检测
+                    delay = random.uniform(1.2, 2.5)
                     await asyncio.sleep(delay)
                 
-                res = await self.fetch_sector_kline(context, sid)
-                results.append(res)
-                
+                res = await self.fetch_sector_api(context, sid, name)
+                if res:
+                    success_count += 1
+                else:
+                    logger.error(f"❌ [挂起] 板块: {name} ({sid}) 网络通道被 WAF 强行重置。")
+            
+            # 停止计时
+            end_time = time.time()
             await browser.close()
             
-        success_count = sum(1 for r in results if r)
-        logger.info(f"🏁 本轮测试执行完毕。成功率: {success_count}/{len(sector_list)}")
+            # 计算云端吞吐指标
+            total_time = end_time - start_time
+            avg_latency = total_time / len(sectors) if sectors else 0
+            throughput = len(sectors) / total_time if total_time > 0 else 0
+            success_rate = (success_count / len(sectors)) * 100 if sectors else 0
+            
+            print("\n" + "="*50)
+            print("📊  GitHub Actions 云端吞吐压力测试评估报告")
+            print("="*50)
+            print(f"🔹 数据同步模式: {'全量历史同步' if self.data_limit > 1000 else '日常增量同步'}")
+            print(f"🔹 目标获取板块数: {len(sectors)} 个")
+            print(f"🔹 成功获取板块数: {success_count} 个")
+            print(f"🔹 综合同步成功率: {success_rate:.2f}%")
+            print(f"🔹 总运行耗时: {total_time:.2f} 秒")
+            print(f"🔹 单板块平均耗时 (含随机延迟): {avg_latency:.2f} 秒/个")
+            print(f"🔹 接口系统吞吐率: {throughput:.2f} 个板块/秒")
+            print("="*50 + "\n")
