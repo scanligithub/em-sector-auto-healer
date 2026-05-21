@@ -20,8 +20,8 @@ class MuscleEngine:
             # 【关键修改】：放弃 networkidle，只要 DOM 出来就强行往下走
             await page.goto(url, wait_until="domcontentloaded", timeout=45000)
             
-            logger.info(f"⏳ DOM已就绪，死等 10 秒让东财的 K线JS 慢慢画图...")
-            await asyncio.sleep(10)
+            logger.info(f"⏳ DOM已就绪，死等 30 秒让东财的 K线JS 慢慢画图...")
+            await asyncio.sleep(30)
             
             # 验证 1：全屏截图取证
             await page.screenshot(path=screenshot_path, full_page=True)
