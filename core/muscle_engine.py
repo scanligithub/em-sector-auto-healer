@@ -2,25 +2,14 @@ import asyncio
 import json
 import os
 from loguru import logger
-import httpx
+from playwright.async_api import async_playwright
 
 class MuscleEngine:
     def __init__(self):
         os.makedirs("data", exist_ok=True)
-        # 精准模拟浏览器基础请求头
-        # 1. 加入 "Connection": "close" 强制不复用 TCP 通道，防止 IIS 触发风控断连
-        # 2. 补全 Accept/Accept-Language 规范
-        self.headers = {
-            "Host": "push2his.eastmoney.com",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "*/*",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "close", 
-            "Referer": "https://quote.eastmoney.com/"
-        }
 
-    async def fetch_sector_kline(self, client: httpx.AsyncClient, sid: str) -> bool:
+    async def fetch_sector_kline(self, context, sid: str) -> bool:
+        # 构建黄金 K 线 API
         url = (
             f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
             f"?secid={sid}"
@@ -34,15 +23,18 @@ class MuscleEngine:
         )
         
         try:
-            logger.info(f"🚀 [API 请求] 正在拉取板块 {sid} 的全量日K线数据...")
-            # 传入当前请求头
-            response = await client.get(url, headers=self.headers, timeout=15.0)
+            logger.info(f"🚀 [API 请求] 正在通过浏览器网络栈拉取 {sid}...")
             
-            if response.status_code != 200:
-                logger.error(f"❌ 接口请求失败，HTTP 状态码: {response.status_code}")
+            # 使用 context.request.get 发起请求，底层使用 Chromium 真实的 TLS 握手特征，避开 WAF 拦截
+            response = await context.request.get(url, headers={
+                "Referer": "https://quote.eastmoney.com/"
+            })
+            
+            if response.status != 200:
+                logger.error(f"❌ 接口请求失败，HTTP 状态码: {response.status}")
                 return False
                 
-            data_json = response.json()
+            data_json = await response.json()
             
             if not data_json or "data" not in data_json or data_json["data"] is None:
                 logger.warning(f"⚠️ 板块 {sid} 未返回有效内容")
@@ -68,29 +60,29 @@ class MuscleEngine:
                 logger.info(f"📊 样本数据检验 -> [首条] {klines[0]} | [末条] {klines[-1]}")
             return True
             
-        except httpx.HTTPError as e:
-            logger.error(f"💥 网络请求异常 ({sid}): {e}")
-            return False
         except Exception as e:
-            logger.error(f"💥 数据解析异常 ({sid}): {e}")
+            logger.error(f"💥 数据拉取或解析异常 ({sid}): {e}")
             return False
 
     async def run_factory(self, sector_list):
-        logger.info(f"🔬 初始化底层 HTTP/1.1 短连接异步客户端...")
-        
-        # 1. 显式约束 client 使用 http1=True，关闭可能产生冲突的 http2 协议
-        # 2. 鉴于短连接特性，将并发数（max_connections）设为 5 即可实现稳定、温和的高速吞吐
-        limits = httpx.Limits(max_keepalive_connections=0, max_connections=5)
-        
-        async with httpx.AsyncClient(limits=limits, http1=True, http2=False) as client:
-            # 引入微小的延迟发射（100ms），避免高并发网络包瞬间堆叠导致防火墙误判
+        logger.info(f"🔬 启动 Playwright 浏览器网络栈代理引擎...")
+        async with async_playwright() as p:
+            # 开启 headless=True 即可，利用浏览器底层网络特征，无需虚拟显示服务 Xvfb 支持
+            browser = await p.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-dev-shm-usage']
+            )
+            context = await browser.new_context()
+            
             tasks = []
             for i, sid in enumerate(sector_list):
                 if i > 0:
-                    await asyncio.sleep(0.1)
-                tasks.append(self.fetch_sector_kline(client, sid))
+                    # 错开 200ms 发射请求，避免瞬时并发过高
+                    await asyncio.sleep(0.2)
+                tasks.append(self.fetch_sector_kline(context, sid))
                 
             results = await asyncio.gather(*tasks)
+            await browser.close()
             
         success_count = sum(1 for r in results if r)
         logger.info(f"🏁 本轮测试执行完毕。成功率: {success_count}/{len(sector_list)}")
