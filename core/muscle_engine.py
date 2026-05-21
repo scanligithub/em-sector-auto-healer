@@ -9,7 +9,6 @@ class MuscleEngine:
         os.makedirs("data", exist_ok=True)
 
     async def fetch_sector_kline(self, context, sid: str) -> bool:
-        # 构建黄金 K 线 API
         url = (
             f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
             f"?secid={sid}"
@@ -23,15 +22,14 @@ class MuscleEngine:
         )
         
         try:
-            logger.info(f"🚀 [API 请求] 正在通过浏览器网络栈拉取 {sid}...")
+            logger.info(f"🚀 [API 请求] 正在拉取 {sid}...")
             
-            # 使用 context.request.get 发起请求，底层使用 Chromium 真实的 TLS 握手特征，避开 WAF 拦截
             response = await context.request.get(url, headers={
                 "Referer": "https://quote.eastmoney.com/"
             })
             
             if response.status != 200:
-                logger.error(f"❌ 接口请求失败，HTTP 状态码: {response.status}")
+                logger.error(f"❌ {sid} 接口请求失败，HTTP 状态码: {response.status}")
                 return False
                 
             data_json = await response.json()
@@ -67,21 +65,23 @@ class MuscleEngine:
     async def run_factory(self, sector_list):
         logger.info(f"🔬 启动 Playwright 浏览器网络栈代理引擎...")
         async with async_playwright() as p:
-            # 开启 headless=True 即可，利用浏览器底层网络特征，无需虚拟显示服务 Xvfb 支持
             browser = await p.chromium.launch(
                 headless=True,
                 args=['--no-sandbox', '--disable-dev-shm-usage']
             )
             context = await browser.new_context()
             
-            tasks = []
+            results = []
+            # 改为完全确定性的顺序队列执行，拒绝并发冲突
             for i, sid in enumerate(sector_list):
                 if i > 0:
-                    # 错开 200ms 发射请求，避免瞬时并发过高
-                    await asyncio.sleep(0.2)
-                tasks.append(self.fetch_sector_kline(context, sid))
+                    # 每个板块请求间隔 500ms，彻底平滑化流量，消除防 DDoS 拦截机制
+                    await asyncio.sleep(0.5)
                 
-            results = await asyncio.gather(*tasks)
+                # 阻塞式等待上一个请求完全结束
+                res = await self.fetch_sector_kline(context, sid)
+                results.append(res)
+                
             await browser.close()
             
         success_count = sum(1 for r in results if r)
