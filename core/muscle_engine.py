@@ -1,80 +1,84 @@
 import asyncio
+import json
 import os
 from loguru import logger
-from playwright.async_api import async_playwright
+import httpx
 
 class MuscleEngine:
     def __init__(self):
-        # 视觉验证，只测 1-2 个板块即可
-        self.concurrency = 1
         os.makedirs("data", exist_ok=True)
+        # 模拟标准浏览器请求头，提高请求兼容性
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://quote.eastmoney.com/"
+        }
 
-    async def verify_rendering(self, context, sid):
-        page = await context.new_page()
-        screenshot_path = f"data/{sid}_headed_proof.png"
+    async def fetch_sector_kline(self, client: httpx.AsyncClient, sid: str) -> bool:
+        # 使用去除了 cb 回调参数的黄金 API URL，直接拉取纯净 JSON
+        url = (
+            f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
+            f"?secid={sid}"
+            f"&ut=fa5fd1943c7b386f172d6893dbfba10b"
+            f"&fields1=f1,f2,f3,f4,f5,f6"
+            f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+            f"&klt=101"
+            f"&fqt=1"
+            f"&end=20500101"
+            f"&lmt=1000000"
+        )
         
         try:
-            url = f"https://quote.eastmoney.com/bk/{sid}.html"
-            logger.info(f"🚀 [Headed Test] 正在打开 {sid}...")
+            logger.info(f"🚀 [API 请求] 正在拉取板块 {sid} 的全量日K线数据...")
+            response = await client.get(url, headers=self.headers, timeout=15.0)
             
-            # 【关键修改】：放弃 networkidle，只要 DOM 出来就强行往下走
-            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            if response.status_code != 200:
+                logger.error(f"❌ 接口请求失败，HTTP 状态码: {response.status_code}")
+                return False
+                
+            data_json = response.json()
             
-            logger.info(f"⏳ DOM已就绪，死等 10 秒让东财的 K线JS 慢慢画图...")
-            await asyncio.sleep(10)
+            if not data_json or "data" not in data_json or data_json["data"] is None:
+                logger.warning(f"⚠️ 板块 {sid} 未返回有效内容，请核对板块代码是否正确")
+                return False
+                
+            payload = data_json["data"]
+            name = payload.get("name", "未知")
+            code = payload.get("code", "未知")
+            dktotal = payload.get("dktotal", 0)
+            klines = payload.get("klines", [])
             
-            # 验证 1：全屏截图取证
-            await page.screenshot(path=screenshot_path, full_page=True)
-            logger.success(f"📸 正常截图已保存: {screenshot_path}")
-
-            # 验证 2：探测那个决定命运的按钮是否存在
-            god_btn = page.locator("a:has-text('拉长K线')").first
-            is_visible = await god_btn.is_visible()
+            logger.success(
+                f"🎯 [数据就绪] 板块: {name} ({code}) | "
+                f"历史天数: {dktotal} | "
+                f"实际拉取记录数: {len(klines)}"
+            )
             
-            if is_visible:
-                logger.success(f"🎯 [Bingo!] {sid} 的 '拉长K线' 按钮真实可见！引擎渲染成功！")
-            else:
-                logger.warning(f"🚫 [Failed] {sid} 按钮不可见，请下载截图查看真实现场。")
-
-            # 验证 3：看看底层的 JS 变量活了没有
-            chart_state = await page.evaluate("""
-            () => {
-                return {
-                    jquery: typeof window.jQuery,
-                    echarts: typeof window.echarts,
-                    chart: typeof window.KKE,
-                    emchart: typeof window.EMChart
-                }
-            }
-            """)
-            logger.info(f"🧬 [JS State] 引擎状态: {chart_state}")
-
+            # 将清洗前的原始数据落地，便于在 Actions 产物中人工抽样审查
+            output_path = f"data/{sid}_history.json"
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=4)
+            logger.info(f"💾 数据备份成功: {output_path}")
+            
+            if klines:
+                logger.info(f"📊 样本数据检验 -> [首条] {klines[0]} | [末条] {klines[-1]}")
+            return True
+            
+        except httpx.HTTPError as e:
+            logger.error(f"💥 网络请求异常 ({sid}): {e}")
+            return False
         except Exception as e:
-            logger.error(f"💥 {sid} 崩溃: {e}")
-            # 【关键防御】：如果发生异常，也要强行拍一张“死亡遗照”
-            try:
-                await page.screenshot(path=f"data/{sid}_crash_proof.png")
-                logger.info(f"📸 崩溃现场截图已保存")
-            except:
-                pass
-        finally:
-            await page.close()
+            logger.error(f"💥 数据解析异常 ({sid}): {e}")
+            return False
 
     async def run_factory(self, sector_list):
-        logger.info(f"🔬 启动 headed+xvfb 视觉取证环境...")
-        async with async_playwright() as p:
-            # 【核心改动】：headless=False
-            browser = await p.chromium.launch(
-                headless=False, 
-                args=[
-                    '--no-sandbox', 
-                    '--disable-dev-shm-usage',
-                    '--window-size=1280,800'
-                ]
-            )
-            context = await browser.new_context(viewport={'width': 1280, 'height': 800})
+        logger.info(f"🔬 初始化高并发异步请求客户端...")
+        
+        # 维持合理的并发连接池设置，既保证高吞吐，又避免对服务端造成不必要的负载压力
+        limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+        
+        async with httpx.AsyncClient(limits=limits) as client:
+            tasks = [self.fetch_sector_kline(client, sid) for sid in sector_list]
+            results = await asyncio.gather(*tasks)
             
-            for sid in sector_list:
-                await self.verify_rendering(context, sid)
-                
-            await browser.close()
+        success_count = sum(1 for r in results if r)
+        logger.info(f"🏁 本轮测试执行完毕。成功率: {success_count}/{len(sector_list)}")
