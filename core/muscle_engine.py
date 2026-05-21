@@ -24,8 +24,13 @@ class MuscleEngine:
         try:
             logger.info(f"🚀 [API 请求] 正在拉取 {sid}...")
             
+            # 显式补全标准的浏览器 Header 报文，与常规请求无异
             response = await context.request.get(url, headers={
-                "Referer": "https://quote.eastmoney.com/"
+                "Accept": "*/*",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+                "Referer": "https://quote.eastmoney.com/",
+                "Connection": "keep-alive"
             })
             
             if response.status != 200:
@@ -63,22 +68,26 @@ class MuscleEngine:
             return False
 
     async def run_factory(self, sector_list):
-        logger.info(f"🔬 启动 Playwright 浏览器网络栈代理引擎...")
+        logger.info(f"🔬 启动安全脱敏的浏览器网络栈代理引擎...")
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
                 args=['--no-sandbox', '--disable-dev-shm-usage']
             )
-            context = await browser.new_context()
+            
+            # 【核心修改】：在创建上下文时，强行抹除 HeadlessChrome 痕迹，伪装成标准 Windows 桌面版 Chrome
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai"
+            )
             
             results = []
-            # 改为完全确定性的顺序队列执行，拒绝并发冲突
             for i, sid in enumerate(sector_list):
                 if i > 0:
-                    # 每个板块请求间隔 500ms，彻底平滑化流量，消除防 DDoS 拦截机制
+                    # 温和的请求间隔
                     await asyncio.sleep(0.5)
                 
-                # 阻塞式等待上一个请求完全结束
                 res = await self.fetch_sector_kline(context, sid)
                 results.append(res)
                 
