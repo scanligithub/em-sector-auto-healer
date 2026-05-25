@@ -12,6 +12,8 @@ class MuscleEngine:
         os.makedirs(self.output_dir, exist_ok=True)
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         self.data_limit = data_limit
+        # 核心防封控制阈值：每成功执行 15 次 API 请求，强制主动重构上下文以清除长连接限制和 Cookie 累积特征
+        self.rotation_threshold = 15
 
     async def get_active_sectors(self, context) -> list:
         """
@@ -45,6 +47,25 @@ class MuscleEngine:
             return [{"sid": "90.BK1063", "name": "重组蛋白"}]
         finally:
             await page.close()
+
+    async def run_warmup(self, context, target_sid: str):
+        """
+        对当前指定的浏览器上下文进行会话 Cookie 初始化预热
+        """
+        logger.info(f"⏳ 正在针对板块 {target_sid} 进行全局会话 Cookie 预热...")
+        warmup_page = await context.new_page()
+        try:
+            await warmup_page.goto(
+                f"https://quote.eastmoney.com/bk/{target_sid}.html", 
+                wait_until="domcontentloaded", 
+                timeout=25000
+            )
+            await asyncio.sleep(2.0)
+            logger.success("🔑 Cookie 会话预热完毕，新上下文凭证已就绪。")
+        except Exception as e:
+            logger.warning(f"⚠️ 会话预热遇到阻碍: {e}")
+        finally:
+            await warmup_page.close()
 
     async def fetch_sector_api(self, context, sid: str, name: str) -> bool:
         page = await context.new_page()
@@ -80,7 +101,8 @@ class MuscleEngine:
             logger.success(f"🎯 [完成] 板块: {name} ({sid}) | 实拉记录数: {len(klines)}")
             return True
             
-        except Exception:
+        except Exception as e:
+            logger.error(f"💥 浏览器执行异常 ({sid}): {e}")
             return False
         finally:
             await page.close()
@@ -99,60 +121,78 @@ class MuscleEngine:
                 ]
             )
             
+            # 临时拉起一个上下文获取当前的活跃板块列表
+            temp_context = await browser.new_context(user_agent=self.user_agent)
+            sectors_all = await self.get_active_sectors(temp_context)
+            await temp_context.close()
+            
+            sectors = sectors_all[:max_sectors]
+            if not sectors:
+                await browser.close()
+                return
+            
+            # 创建核心工作上下文并执行首次会话预热
             context = await browser.new_context(
                 user_agent=self.user_agent,
                 viewport={"width": 800, "height": 600},
                 locale="zh-CN",
                 timezone_id="Asia/Shanghai"
             )
+            await self.run_warmup(context, sectors[0]['sid'])
             
-            # 获取交易板块
-            sectors_all = await self.get_active_sectors(context)
-            sectors = sectors_all[:max_sectors]
-            
-            if not sectors:
-                await browser.close()
-                return
-            
-            # 会话凭证预热
-            logger.info("⏳ 正在进行全局会话 Cookie 预热（穿透测试的关键起点）...")
-            warmup_page = await context.new_page()
-            try:
-                await warmup_page.goto(
-                    f"https://quote.eastmoney.com/bk/{sectors[0]['sid']}.html", 
-                    wait_until="domcontentloaded", 
-                    timeout=25000
-                )
-                await asyncio.sleep(2.0)
-                logger.success("🔑 Cookie 预热执行完毕，会话凭证已在上下文中同步。")
-            except Exception as e:
-                logger.warning(f"⚠️ 会话预热遇到阻碍: {e}")
-            finally:
-                await warmup_page.close()
-            
-            # 开始计时
             start_time = time.time()
             success_count = 0
+            success_count_in_session = 0  # 当前 session 成功抓取计数器
             
             # 顺序采集
             for i, item in enumerate(sectors):
                 sid = item["sid"]
                 name = item["name"]
                 
+                # ----------------- 【核心控制：定期上下文重构】 -----------------
+                if success_count_in_session >= self.rotation_threshold:
+                    logger.warning(f"🔄 当前会话已成功请求 {self.rotation_threshold} 次，执行主动重建，释放长连接 TCP 绑定...")
+                    await context.close()
+                    # 重新创建干净的上下文并预热
+                    context = await browser.new_context(
+                        user_agent=self.user_agent,
+                        viewport={"width": 800, "height": 600},
+                        locale="zh-CN",
+                        timezone_id="Asia/Shanghai"
+                    )
+                    await self.run_warmup(context, sid)
+                    success_count_in_session = 0
+                
                 if i > 0:
-                    # 【核心修改：自适应控流逻辑】
-                    # 如果获取全部历史数据（data_limit > 1000），使用更稳健的 2.0s ~ 3.5s 保护频次
-                    # 如果是增量日常同步（data_limit <= 1000），使用更紧凑的 1.2s ~ 2.5s 提高速度
                     delay = random.uniform(2.0, 3.5) if self.data_limit > 1000 else random.uniform(1.2, 2.5)
                     await asyncio.sleep(delay)
                 
+                # 执行 API 拉取
                 res = await self.fetch_sector_api(context, sid, name)
+                
+                # ----------------- 【核心控制：通道挂起自愈重试】 -----------------
+                if not res:
+                    logger.error(f"🚨 [挂起] 板块: {name} ({sid}) 网络通道异常重置。启动退避自愈机制...")
+                    await asyncio.sleep(5.0)  # 5秒防爆退避
+                    # 强制销毁当前卡死的上下文
+                    await context.close()
+                    # 重新拉起并预热
+                    context = await browser.new_context(
+                        user_agent=self.user_agent,
+                        viewport={"width": 800, "height": 600},
+                        locale="zh-CN",
+                        timezone_id="Asia/Shanghai"
+                    )
+                    await self.run_warmup(context, sid)
+                    # 断点重试
+                    logger.info(f"🔄 正在对板块: {name} ({sid}) 发起断点续传重试...")
+                    res = await self.fetch_sector_api(context, sid, name)
+                    success_count_in_session = 0
+                
                 if res:
                     success_count += 1
-                else:
-                    logger.error(f"❌ [挂起] 板块: {name} ({sid}) 网络通道被 WAF 强行重置。")
-            
-            # 停止计时
+                    success_count_in_session += 1
+                    
             end_time = time.time()
             await browser.close()
             
