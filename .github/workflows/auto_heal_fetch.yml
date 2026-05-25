@@ -28,7 +28,7 @@ jobs:
         env:
           DATA_LIMIT: 1000000  # 【修改点】 1000000 代表获取全部历史数据
           MAX_SECTORS: 100     # 云端批量同步板块上限
-          CF_WORKER_URL: # ${{ secrets.CF_WORKER_URL }}
+          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
         run: |
           python main.py
 
