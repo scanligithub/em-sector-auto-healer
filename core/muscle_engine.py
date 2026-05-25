@@ -12,7 +12,18 @@ class MuscleEngine:
         os.makedirs(self.output_dir, exist_ok=True)
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         self.data_limit = data_limit
+        
+        # 1. 动态加载环境变量中的 Cloudflare Worker 代理域名
+        self.cf_worker_url = os.environ.get("CF_WORKER_URL", "").strip()
+        # 清除可能误填的协议头和尾部斜杠，统一规范为 "xxx.workers.dev"
+        if self.cf_worker_url:
+            self.cf_worker_url = self.cf_worker_url.replace("https://", "").replace("http://", "").rstrip("/")
+            logger.info(f"🚀 [代理激活] 成功挂载 Cloudflare Worker 代理通道: {self.cf_worker_url}")
+        else:
+            logger.warning("⚠️ [直连模式] 未检测到 CF_WORKER_URL 配置，管线将通过本地公网 IP 直连东财网关。")
+
         # 核心防封控制阈值：每成功执行 15 次 API 请求，强制主动重构上下文以清除长连接限制和 Cookie 累积特征
+        # 如果启用了 CF Worker，由于出口 IP 动态轮转，此阈值可以适当放宽，但保留此机制作为底层双重防御
         self.rotation_threshold = 15
 
     async def get_active_sectors(self, context) -> list:
@@ -69,6 +80,8 @@ class MuscleEngine:
 
     async def fetch_sector_api(self, context, sid: str, name: str) -> bool:
         page = await context.new_page()
+        
+        # 原始东财K线数据源 URL
         url = (
             f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
             f"?secid={sid}"
@@ -81,8 +94,14 @@ class MuscleEngine:
             f"&lmt={self.data_limit}"
         )
         
+        # ----------------- 【核心改进：动态重写代理路由】 -----------------
+        if self.cf_worker_url:
+            # 将物理目标域名重写为您的 Cloudflare Worker 代理服务器
+            url = url.replace("push2his.eastmoney.com", self.cf_worker_url)
+        
         try:
-            # 浏览器静默导航至目标 API 网页
+            logger.info(f"🌐 [API 请求] 正在向目标网关发送请求 {sid}...")
+            # 浏览器静默导航
             await page.goto(url, wait_until="domcontentloaded", timeout=15000)
             raw_text = await page.evaluate("() => document.body.innerText")
             data_json = json.loads(raw_text)
@@ -93,7 +112,7 @@ class MuscleEngine:
             payload = data_json["data"]
             klines = payload.get("klines", [])
             
-            # 以紧凑 JSON 格式落地
+            # 以紧凑 JSON 格式保存
             output_path = os.path.join(self.output_dir, f"{sid}_direct.json")
             with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False)
@@ -102,7 +121,7 @@ class MuscleEngine:
             return True
             
         except Exception as e:
-            logger.error(f"💥 浏览器执行异常 ({sid}): {e}")
+            logger.error(f"💥 数据获取异常 ({sid}): {e}")
             return False
         finally:
             await page.close()
@@ -121,7 +140,7 @@ class MuscleEngine:
                 ]
             )
             
-            # 临时拉起一个上下文获取当前的活跃板块列表
+            # 建立第一个临时上下文获取当前的活跃板块列表（此步骤保持直连，确保安全）
             temp_context = await browser.new_context(user_agent=self.user_agent)
             sectors_all = await self.get_active_sectors(temp_context)
             await temp_context.close()
@@ -164,7 +183,11 @@ class MuscleEngine:
                     success_count_in_session = 0
                 
                 if i > 0:
-                    delay = random.uniform(2.0, 3.5) if self.data_limit > 1000 else random.uniform(1.2, 2.5)
+                    # 如果使用 CF Worker，由于不存在 IP 封锁危险，延迟可以调得很低（1.0s ~ 1.8s），实现闪电同步
+                    # 如果是直连，仍采用自适应稳健延迟
+                    delay = random.uniform(1.0, 1.8) if self.cf_worker_url else (
+                        random.uniform(2.0, 3.5) if self.data_limit > 1000 else random.uniform(1.2, 2.5)
+                    )
                     await asyncio.sleep(delay)
                 
                 # 执行 API 拉取
@@ -172,7 +195,7 @@ class MuscleEngine:
                 
                 # ----------------- 【核心控制：通道挂起自愈重试】 -----------------
                 if not res:
-                    logger.error(f"🚨 [挂起] 板块: {name} ({sid}) 网络通道异常重置。启动退避自愈机制...")
+                    logger.error(f"🚨 [挂起] 板块: {name} ({sid}) 网络通道异常。启动退避自愈机制...")
                     await asyncio.sleep(5.0)  # 5秒防爆退避
                     # 强制销毁当前卡死的上下文
                     await context.close()
@@ -205,6 +228,7 @@ class MuscleEngine:
             print("\n" + "="*50)
             print("📊  GitHub Actions 云端吞吐压力测试评估报告")
             print("="*50)
+            print(f"🔹 运行模式: {'Cloudflare 边缘代理' if self.cf_worker_url else '云端 IP 直连'}")
             print(f"🔹 数据同步模式: {'全量历史同步' if self.data_limit > 1000 else '日常增量同步'}")
             print(f"🔹 目标获取板块数: {len(sectors)} 个")
             print(f"🔹 成功获取板块数: {success_count} 个")
