@@ -18,11 +18,11 @@ class MuscleEngine:
         self.cf_worker_url = os.environ.get("CF_WORKER_URL", "").strip()
         if self.cf_worker_url:
             self.cf_worker_url = self.cf_worker_url.replace("https://", "").replace("http://", "").rstrip("/")
-            logger.info(f"🚀 [代理激活] 成功挂载 Cloudflare Worker 代理通道: {self.cf_worker_url}")
+            logger.info(f"🚀 [代理模式] 成功挂载 Cloudflare Worker 边缘代理网关: {self.cf_worker_url}")
         else:
-            logger.warning("⚠️ [直连模式] 未检测到 CF_WORKER_URL 配置，管线将通过本地公网 IP 直连东财网关。")
+            logger.warning("⚠️ [直连模式] 未检测到 CF_WORKER_URL 环境变量。管线将通过本地公网 IP 直接对抗东财 WAF。")
 
-        # 核心防封控制阈值：每成功执行 15 次 API 请求，强制主动重构上下文以清除长连接限制和 Cookie 累积特征
+        # 核心防封控制阈值：每成功执行 15 次请求，强制主动重构上下文以清除长连接限制和 Cookie 累积特征
         self.rotation_threshold = 15
 
     async def get_active_sectors(self, context) -> list:
@@ -96,25 +96,25 @@ class MuscleEngine:
             f"&lmt={self.data_limit}"
         )
         
-        # 动态代理路由重写
+        # 动态路由代理重写（如果配置了 CF_WORKER_URL）
         if self.cf_worker_url:
             encoded_target = urllib.parse.quote(url, safe="")
             url = f"https://{self.cf_worker_url}/?url={encoded_target}"
         
         try:
-            logger.info(f"🌐 [API 请求] 正在向目标网关发送请求 {sid}...")
+            logger.info(f"🌐 [API 请求] 正在发送数据请求 {sid}...")
             await page.goto(url, wait_until="domcontentloaded", timeout=15000)
             raw_text = await page.evaluate("() => document.body.innerText")
             
             if not raw_text:
-                logger.error(f"❌ 目标网关返回空响应 ({sid})")
+                logger.error(f"❌ 数据网关返回空响应 ({sid})")
                 return False
             
-            # 防御性 JSON 解析
+            # 防御性 JSON 解析，提取由于 WAF 拦截产生的非 JSON 阻断 HTML
             try:
                 data_json = json.loads(raw_text)
             except json.JSONDecodeError:
-                logger.error(f"💥 [解析失败] 网关返回的非 JSON 内容前 300 字为:\n{'-'*40}\n{raw_text[:300].strip()}\n{'-'*40}")
+                logger.error(f"💥 [解析失败] 接口返回了非 JSON 格式。前 300 字特征:\n{raw_text[:300].strip()}")
                 return False
             
             if not data_json or "data" not in data_json or data_json["data"] is None:
@@ -140,7 +140,6 @@ class MuscleEngine:
         logger.info("🧪 启动云端 headless 无头浏览器数据吞吐管线...")
         
         async with async_playwright() as p:
-            # 1. 启动无头浏览器
             browser = await p.chromium.launch(
                 headless=True, 
                 args=[
@@ -150,7 +149,7 @@ class MuscleEngine:
                 ]
             )
             
-            # 2. 直接开辟核心工作上下文
+            # 创建工作上下文
             context = await browser.new_context(
                 user_agent=self.user_agent,
                 viewport={"width": 800, "height": 600},
@@ -158,34 +157,36 @@ class MuscleEngine:
                 timezone_id="Asia/Shanghai"
             )
             
-            # 3. 【首要动作】利用龙头行业板块进行初始化全局 Cookie 会话预热，获取通行证
+            # 1. 【首要动作：Cookie 预热】
+            # 先进行会话预热，确保后续即使在直连模式下在线获取列表也能 100% 成功
             logger.info("⏳ 正在启动初始化全局会话 Cookie 预热...")
             await self.run_warmup(context, "90.BK1063")
             
-            # 4. 【持证上岗】在已经手持合法凭证的 context 下，安全地在线获取板块列表
+            # 2. 【在线拉取 100 板块】
             sectors_all = await self.get_active_sectors(context)
             sectors = sectors_all[:max_sectors]
             
             if not sectors:
-                logger.error("❌ 板块列表加载为空，中止管线。")
+                logger.error("❌ 板块列表加载为空，同步中止。")
                 await context.close()
                 await browser.close()
                 return
             
             start_time = time.time()
             success_count = 0
-            success_count_in_session = 1  # 计数器设为 1（因为已在第一步对第一个板块完成了一次 Warmup）
+            success_count_in_session = 1  # 已执行 1 次 Warmup
             
-            # 顺序采集
+            # 3. 顺序执行采集
             for i, item in enumerate(sectors):
                 sid = item["sid"]
                 name = item["name"]
                 
-                # ----------------- 【核心控制：定期上下文重构】 -----------------
-                if success_count_in_session >= self.rotation_threshold:
-                    logger.warning(f"🔄 当前会话已成功请求 {self.rotation_threshold} 次，执行主动重建...")
+                # ----------------- 【核心控制一：定期上下文新陈代谢】 -----------------
+                # 只有直连模式才需要频繁重构。如果走 CF Worker 边缘代理，放宽重构阈值以最大化网络吞吐
+                rotation_limit = 50 if self.cf_worker_url else self.rotation_threshold
+                if success_count_in_session >= rotation_limit:
+                    logger.warning(f"🔄 当前会话已成功请求 {rotation_limit} 次，执行主动重建...")
                     await context.close()
-                    # 重新创建干净的上下文并预热
                     context = await browser.new_context(
                         user_agent=self.user_agent,
                         viewport={"width": 800, "height": 600},
@@ -196,21 +197,33 @@ class MuscleEngine:
                     success_count_in_session = 0
                 
                 if i > 0:
-                    delay = random.uniform(1.0, 1.8) if self.cf_worker_url else (
+                    # 动态延迟控制：如果走 CF Worker 代理，可以使用 0.8s ~ 1.5s 的极高吞吐速度；
+                    # 如果是本地直连全量，使用安全的 2.0s ~ 3.5s。
+                    delay = random.uniform(0.8, 1.5) if self.cf_worker_url else (
                         random.uniform(2.0, 3.5) if self.data_limit > 1000 else random.uniform(1.2, 2.5)
                     )
                     await asyncio.sleep(delay)
                 
-                # 执行 API 拉取
+                # 4. 执行 API 数据抓取
                 res = await self.fetch_sector_api(context, sid, name)
                 
-                # ----------------- 【核心控制：通道挂起自愈重试】 -----------------
-                if not res:
-                    logger.error(f"🚨 [挂起] 板块: {name} ({sid}) 网络通道异常。启动退避自愈机制...")
-                    await asyncio.sleep(5.0)  # 5秒防爆退避
-                    # 强制销毁当前卡死的上下文
+                # ----------------- 【核心控制二：阶梯式指数退避自愈重试】 -----------------
+                retry_count = 0
+                max_retries = 3
+                backoff_delays = [8.0, 30.0, 90.0]  # 三级降温退避时长
+                
+                while not res and retry_count < max_retries:
+                    backoff_time = backoff_delays[retry_count]
+                    logger.error(
+                        f"🚨 [挂起/重置] 板块: {name} ({sid}) 网络通道异常。 "
+                        f"触发第 {retry_count+1}/{max_retries} 次断点自愈..."
+                    )
+                    logger.warning(f"💤 正在启动物理降温，强制退避静默 {backoff_time} 秒...")
+                    await asyncio.sleep(backoff_time)
+                    
+                    # 彻底销毁被污染、被限流的旧上下文
                     await context.close()
-                    # 重新拉起并预热
+                    # 重建全新干净的浏览器上下文环境
                     context = await browser.new_context(
                         user_agent=self.user_agent,
                         viewport={"width": 800, "height": 600},
@@ -218,10 +231,11 @@ class MuscleEngine:
                         timezone_id="Asia/Shanghai"
                     )
                     await self.run_warmup(context, sid)
-                    # 断点重试
+                    
                     logger.info(f"🔄 正在对板块: {name} ({sid}) 发起断点续传重试...")
                     res = await self.fetch_sector_api(context, sid, name)
                     success_count_in_session = 0
+                    retry_count += 1
                 
                 if res:
                     success_count += 1
@@ -231,7 +245,7 @@ class MuscleEngine:
             await context.close()
             await browser.close()
             
-            # 计算云端吞吐指标
+            # 计算并展现云端吞吐性能报告
             total_time = end_time - start_time
             avg_latency = total_time / len(sectors) if sectors else 0
             throughput = len(sectors) / total_time if total_time > 0 else 0
