@@ -3,7 +3,7 @@ import json
 import os
 import random
 import time
-import urllib.parse  # 👈 【引入标准 URL 编码模块】
+import urllib.parse
 from loguru import logger
 from playwright.async_api import async_playwright
 
@@ -22,14 +22,14 @@ class MuscleEngine:
         else:
             logger.warning("⚠️ [直连模式] 未检测到 CF_WORKER_URL 配置，管线将通过本地公网 IP 直连东财网关。")
 
-        # 核心防封控制阈值
+        # 核心防封控制阈值：每成功执行 15 次 API 请求，强制主动重构上下文以清除长连接限制和 Cookie 累积特征
         self.rotation_threshold = 15
 
     async def get_active_sectors(self, context) -> list:
         """
-        从东财行情中心实时获取当前交易排名前 100 的行业板块
+        在已完成会话预热的 Context 下，在线获取前 100 个活跃行业板块列表
         """
-        logger.info("📡 [CI 准备] 正在从数据源在线获取前 100 个活跃行业板块列表...")
+        logger.info("📡 [列表获取] 正在从数据源在线获取前 100 个活跃行业板块列表...")
         page = await context.new_page()
         list_url = (
             "https://push2.eastmoney.com/api/qt/clist/get"
@@ -40,6 +40,11 @@ class MuscleEngine:
         try:
             await page.goto(list_url, wait_until="domcontentloaded", timeout=20000)
             raw_text = await page.evaluate("() => document.body.innerText")
+            
+            if not raw_text:
+                logger.error("❌ 获取板块列表返回空响应")
+                return []
+                
             list_data = json.loads(raw_text)
             sector_items = list_data.get("data", {}).get("diff", [])
             
@@ -91,13 +96,10 @@ class MuscleEngine:
             f"&lmt={self.data_limit}"
         )
         
-        # ----------------- 【核心修改：参数化打包转发】 -----------------
+        # 动态代理路由重写
         if self.cf_worker_url:
-            # 1. 对原始目标东财 URL 进行 100% 深度编码
             encoded_target = urllib.parse.quote(url, safe="")
-            # 2. 将整个原始 URL 作为 'url' 参数拼装给您的万能代理 Worker
             url = f"https://{self.cf_worker_url}/?url={encoded_target}"
-        # --------------------------------------------------------------
         
         try:
             logger.info(f"🌐 [API 请求] 正在向目标网关发送请求 {sid}...")
@@ -108,7 +110,7 @@ class MuscleEngine:
                 logger.error(f"❌ 目标网关返回空响应 ({sid})")
                 return False
             
-            # 自诊调试核心：防御性 JSON 解析
+            # 防御性 JSON 解析
             try:
                 data_json = json.loads(raw_text)
             except json.JSONDecodeError:
@@ -138,6 +140,7 @@ class MuscleEngine:
         logger.info("🧪 启动云端 headless 无头浏览器数据吞吐管线...")
         
         async with async_playwright() as p:
+            # 1. 启动无头浏览器
             browser = await p.chromium.launch(
                 headless=True, 
                 args=[
@@ -147,34 +150,42 @@ class MuscleEngine:
                 ]
             )
             
-            temp_context = await browser.new_context(user_agent=self.user_agent)
-            sectors_all = await self.get_active_sectors(temp_context)
-            await temp_context.close()
-            
-            sectors = sectors_all[:max_sectors]
-            if not sectors:
-                await browser.close()
-                return
-            
+            # 2. 直接开辟核心工作上下文
             context = await browser.new_context(
                 user_agent=self.user_agent,
                 viewport={"width": 800, "height": 600},
                 locale="zh-CN",
                 timezone_id="Asia/Shanghai"
             )
-            await self.run_warmup(context, sectors[0]['sid'])
+            
+            # 3. 【首要动作】利用龙头行业板块进行初始化全局 Cookie 会话预热，获取通行证
+            logger.info("⏳ 正在启动初始化全局会话 Cookie 预热...")
+            await self.run_warmup(context, "90.BK1063")
+            
+            # 4. 【持证上岗】在已经手持合法凭证的 context 下，安全地在线获取板块列表
+            sectors_all = await self.get_active_sectors(context)
+            sectors = sectors_all[:max_sectors]
+            
+            if not sectors:
+                logger.error("❌ 板块列表加载为空，中止管线。")
+                await context.close()
+                await browser.close()
+                return
             
             start_time = time.time()
             success_count = 0
-            success_count_in_session = 0
+            success_count_in_session = 1  # 计数器设为 1（因为已在第一步对第一个板块完成了一次 Warmup）
             
+            # 顺序采集
             for i, item in enumerate(sectors):
                 sid = item["sid"]
                 name = item["name"]
                 
+                # ----------------- 【核心控制：定期上下文重构】 -----------------
                 if success_count_in_session >= self.rotation_threshold:
                     logger.warning(f"🔄 当前会话已成功请求 {self.rotation_threshold} 次，执行主动重建...")
                     await context.close()
+                    # 重新创建干净的上下文并预热
                     context = await browser.new_context(
                         user_agent=self.user_agent,
                         viewport={"width": 800, "height": 600},
@@ -190,12 +201,16 @@ class MuscleEngine:
                     )
                     await asyncio.sleep(delay)
                 
+                # 执行 API 拉取
                 res = await self.fetch_sector_api(context, sid, name)
                 
+                # ----------------- 【核心控制：通道挂起自愈重试】 -----------------
                 if not res:
                     logger.error(f"🚨 [挂起] 板块: {name} ({sid}) 网络通道异常。启动退避自愈机制...")
-                    await asyncio.sleep(5.0)
+                    await asyncio.sleep(5.0)  # 5秒防爆退避
+                    # 强制销毁当前卡死的上下文
                     await context.close()
+                    # 重新拉起并预热
                     context = await browser.new_context(
                         user_agent=self.user_agent,
                         viewport={"width": 800, "height": 600},
@@ -203,6 +218,7 @@ class MuscleEngine:
                         timezone_id="Asia/Shanghai"
                     )
                     await self.run_warmup(context, sid)
+                    # 断点重试
                     logger.info(f"🔄 正在对板块: {name} ({sid}) 发起断点续传重试...")
                     res = await self.fetch_sector_api(context, sid, name)
                     success_count_in_session = 0
@@ -212,9 +228,10 @@ class MuscleEngine:
                     success_count_in_session += 1
                     
             end_time = time.time()
+            await context.close()
             await browser.close()
             
-            # 计算吞吐指标
+            # 计算云端吞吐指标
             total_time = end_time - start_time
             avg_latency = total_time / len(sectors) if sectors else 0
             throughput = len(sectors) / total_time if total_time > 0 else 0
