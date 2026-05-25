@@ -3,6 +3,7 @@ import json
 import os
 import random
 import time
+import urllib.parse  # 👈 【引入标准 URL 编码模块】
 from loguru import logger
 from playwright.async_api import async_playwright
 
@@ -90,9 +91,13 @@ class MuscleEngine:
             f"&lmt={self.data_limit}"
         )
         
-        # 动态代理路由重写
+        # ----------------- 【核心修改：参数化打包转发】 -----------------
         if self.cf_worker_url:
-            url = url.replace("push2his.eastmoney.com", self.cf_worker_url)
+            # 1. 对原始目标东财 URL 进行 100% 深度编码
+            encoded_target = urllib.parse.quote(url, safe="")
+            # 2. 将整个原始 URL 作为 'url' 参数拼装给您的万能代理 Worker
+            url = f"https://{self.cf_worker_url}/?url={encoded_target}"
+        # --------------------------------------------------------------
         
         try:
             logger.info(f"🌐 [API 请求] 正在向目标网关发送请求 {sid}...")
@@ -103,13 +108,12 @@ class MuscleEngine:
                 logger.error(f"❌ 目标网关返回空响应 ({sid})")
                 return False
             
-            # ----------------- 【自诊调试核心：防御性 JSON 解析】 -----------------
+            # 自诊调试核心：防御性 JSON 解析
             try:
                 data_json = json.loads(raw_text)
-            except json.JSONDecodeError as je:
+            except json.JSONDecodeError:
                 logger.error(f"💥 [解析失败] 网关返回的非 JSON 内容前 300 字为:\n{'-'*40}\n{raw_text[:300].strip()}\n{'-'*40}")
                 return False
-            # ------------------------------------------------------------------
             
             if not data_json or "data" not in data_json or data_json["data"] is None:
                 return False
