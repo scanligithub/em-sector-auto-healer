@@ -25,16 +25,13 @@ jobs:
           python -m playwright install chromium --with-deps
 
       - name: Run Cloud Benchmark
-        env:
-          DATA_LIMIT: 1000000  # 【修改点】 1000000 代表获取全部历史数据
-          MAX_SECTORS: 100     # 云端批量同步板块上限
-          CF_WORKER_URL: # ${{ secrets.CF_WORKER_URL }}
         run: |
           python main.py
 
-      # 打包上传抓取到的全量历史 JSON 数据压缩包
+      # 打包上传抓取成功的板块数据包（哪怕触发了熔断，此前抓到的一部分数据也会被保存）
       - name: Upload Intercepted Artifacts
         uses: actions/upload-artifact@v4
+        if: always() # 确保即使脚本熔断失败，成功下载的 JSON 也会被归档
         with:
           name: cloud-sector-full-history-jsons
           path: data/*_direct.json
