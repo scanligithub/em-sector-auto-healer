@@ -73,7 +73,7 @@ jobs:
           python -m playwright install chromium --with-deps
           
       - name: Download Chunks
-        uses: actions/download-artifact@v4  # 【已修正：将 upload 修复为 download】
+        uses: actions/download-artifact@v4
         with:
           name: chunks-artifact
           path: chunks/
@@ -171,6 +171,9 @@ jobs:
     if: needs.aggregator.outputs.status == 'DONE'
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4  # 【已修正：在头部添加 checkout 迁出代码，提供 .git 运行上下文】
+        
       - name: Download Final Chain
         uses: actions/download-artifact@v4
         with:
@@ -185,7 +188,8 @@ jobs:
           IFS=',' read -ra ADDR <<< "$CHAIN_IDS"
           for id in "${ADDR[@]}"; do
             echo "⬇️ 正在跨节点回收 Run ID: $id 产生的全部 K线碎片..."
-            gh run download $id --pattern "success-data-$id-chunk-*" --dir final_dataset || true
+            # 【已修正：显式加入 --repo 参数避免上下文识别模糊导致 gh 报错中断】
+            gh run download $id --pattern "success-data-$id-chunk-*" --dir final_dataset --repo ${{ github.repository }} || true
           done
           
           # 执行物理扁平化及同名覆盖去重
