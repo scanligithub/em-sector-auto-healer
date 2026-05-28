@@ -2,36 +2,198 @@ name: Sector Fetcher Nitro
 
 on:
   workflow_dispatch:
+    inputs:
+      attempt:
+        description: 'Current Execution Attempt (Internal use)'
+        required: false
+        default: '1'
+      chain_run_ids:
+        description: 'Comma separated historical run IDs (Internal use)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
-  cloud-api-bench:
+  # 阶段 1：调度器
+  dispatcher:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install -r requirements.txt
+      
+      # 如果是接力轮，下载上一轮存放在云端的未完成名单
+      - name: Download Pending List
+        if: ${{ github.event.inputs.attempt != '1' && github.event.inputs.attempt != '' }}
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: auto_heal_fetch.yml
+          name: pending-list-artifact
+          path: .
+          
+      - name: Generate Matrix
+        id: set-matrix
+        env:
+          ATTEMPT_COUNT: ${{ github.event.inputs.attempt || '1' }}
+        run: |
+          python scripts/dispatcher.py
+          echo "matrix=$(cat matrix.json)" >> $GITHUB_OUTPUT
+          
+      # 上传分块文件供后续的 Job 下载使用
+      - name: Upload Chunks
+        uses: actions/upload-artifact@v4
+        with:
+          name: chunks-artifact
+          path: chunks/*.json
+          retention-days: 1
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+  # 阶段 2：分布式集群下载
+  fetch-cluster:
+    needs: dispatcher
+    runs-on: ubuntu-latest
+    # 【核心】如果矩阵是空（[]），说明任务已完成，此阶段自动跳过
+    strategy:
+      matrix:
+        chunk_id: ${{ fromJson(needs.dispatcher.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: 'pip'
-
-      - name: Install Dependencies
-        run: |
+      - run: |
           pip install -r requirements.txt
           python -m playwright install chromium --with-deps
-
-      - name: Run Cloud Benchmark
-        run: |
-          python main.py
-
-      # 打包上传抓取成功的板块数据包（哪怕触发了熔断，此前抓到的一部分数据也会被保存）
-      - name: Upload Intercepted Artifacts
-        uses: actions/upload-artifact@v4
-        if: always() # 确保即使脚本熔断失败，成功下载的 JSON 也会被归档
+          
+      - name: Download Chunks
+        uses: actions/download-artifact@v4
         with:
-          name: cloud-sector-full-history-jsons
-          path: data/*_direct.json
+          name: chunks-artifact
+          path: chunks/
+          
+      - name: Execute Node Engine
+        run: python core/muscle_engine.py ${{ matrix.chunk_id }}
+        
+      # 无论是否熔断，成功抓取到的数据传上去保存
+      - name: Upload Success Data
+        uses: actions/upload-artifact@v4
+        with:
+          name: success-data-${{ github.run_id }}-chunk-${{ matrix.chunk_id }}
+          path: success_data_${{ matrix.chunk_id }}/*.json
+          retention-days: 1
+          
+      # 上传此节点失败/未完成的名单
+      - name: Upload Failed List
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-list-chunk-${{ matrix.chunk_id }}
+          path: failed_list_${{ matrix.chunk_id }}.json
+          retention-days: 1
+
+  # 阶段 3：裁判所与轮回接力
+  aggregator:
+    needs: [dispatcher, fetch-cluster]
+    if: always() && needs.dispatcher.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.judge.outputs.status }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download Failed Lists
+        uses: actions/download-artifact@v4
+        with:
+          pattern: failed-list-chunk-*
+          merge-multiple: true
+          path: .
+          
+      - name: Aggregate & Judge
+        id: judge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_ATTEMPT: ${{ github.event.inputs.attempt || '1' }}
+          CHAIN_IDS: ${{ github.event.inputs.chain_run_ids || '' }}
+        run: |
+          python scripts/aggregator.py > result.txt
+          REMAINING=$(grep "COUNT=" result.txt | cut -d'=' -f2)
+          echo "剩余未完成板块数: $REMAINING"
+          
+          NEW_CHAIN="${CHAIN_IDS},${{ github.run_id }}"
+          # 去除头部可能存在的逗号
+          NEW_CHAIN=$(echo $NEW_CHAIN | sed 's/^,//')
+          
+          if [ "$REMAINING" -gt "0" ] && [ "$CURRENT_ATTEMPT" -lt "5" ]; then
+            echo "💥 存在未完成任务，触发第 $((CURRENT_ATTEMPT+1)) 轮接力!"
+            echo "status=CONTINUE" >> $GITHUB_OUTPUT
+            gh workflow run auto_heal_fetch.yml \
+              -f attempt=$((CURRENT_ATTEMPT+1)) \
+              -f chain_run_ids="$NEW_CHAIN"
+          else
+            echo "✅ 任务全部完成，或已达到最大重试次数 (5次)。"
+            echo "status=DONE" >> $GITHUB_OUTPUT
+            # 记录下所有积累的 run_ids 给 release 步骤使用
+            echo "$NEW_CHAIN" > final_chain.txt
+          fi
+          
+      # 上传汇总后的 pending_list 供下一轮接力读取
+      - name: Upload Pending List
+        uses: actions/upload-artifact@v4
+        with:
+          name: pending-list-artifact
+          path: pending_list.json
+          retention-days: 1
+          
+      - name: Upload Final Chain
+        if: steps.judge.outputs.status == 'DONE'
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-chain-artifact
+          path: final_chain.txt
+
+  # 阶段 4：终极发布
+  releaser:
+    needs: aggregator
+    # 只有当裁判宣布 "DONE" 且没有抛出下一轮异常时，才执行发布
+    if: needs.aggregator.outputs.status == 'DONE'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Final Chain
+        uses: actions/download-artifact@v4
+        with:
+          name: final-chain-artifact
+          
+      - name: Download All Success Data Across Runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir final_dataset
+          CHAIN_IDS=$(cat final_chain.txt)
+          IFS=',' read -ra ADDR <<< "$CHAIN_IDS"
+          for id in "${ADDR[@]}"; do
+            echo "⬇️ 从历史 Run $id 提取成功数据..."
+            gh run download $id --pattern "success-data-*-chunk-*" --dir final_dataset || true
+          done
+          
+          # 整理扁平化目录
+          find final_dataset -type f -name "*.json" -exec mv {} final_dataset/ \;
+          find final_dataset -type d -empty -delete
+          
+          cd final_dataset
+          zip -r ../Full_Sector_Klines.zip .
+          
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DATE_TAG=$(date +'%Y%m%d_%H%M%S')
+          gh release create "sector-data-${DATE_TAG}" Full_Sector_Klines.zip \
+            --title "Sector Klines Database ($DATE_TAG)" \
+            --notes "分布式全量拉取完成。包含所有成功的 K线 JSON。"
