@@ -53,7 +53,7 @@ jobs:
           path: chunks/*.json
           retention-days: 1
 
-  # 阶段 2：20节点分布式抓取
+  # 阶段 2：20 节点分布式抓取
   fetch-cluster:
     needs: dispatcher
     runs-on: ubuntu-latest
@@ -73,7 +73,7 @@ jobs:
           python -m playwright install chromium --with-deps
           
       - name: Download Chunks
-        uses: actions/download-artifact@v4
+        uses: actions/upload-artifact@v4
         with:
           name: chunks-artifact
           path: chunks/
@@ -100,7 +100,7 @@ jobs:
   aggregator:
     needs: [dispatcher, fetch-cluster]
     if: always() && needs.dispatcher.outputs.matrix != '[]'
-    runs-ok: ubuntu-latest
+    runs-on: ubuntu-latest  # 【已修正：将 runs-ok 修复为 runs-on】
     outputs:
       status: ${{ steps.judge.outputs.status }}
     steps:
