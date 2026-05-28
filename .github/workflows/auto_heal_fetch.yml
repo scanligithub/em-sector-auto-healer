@@ -73,7 +73,7 @@ jobs:
           python -m playwright install chromium --with-deps
           
       - name: Download Chunks
-        uses: actions/upload-artifact@v4
+        uses: actions/download-artifact@v4  # 【已修正：将 upload 修复为 download】
         with:
           name: chunks-artifact
           path: chunks/
@@ -100,7 +100,7 @@ jobs:
   aggregator:
     needs: [dispatcher, fetch-cluster]
     if: always() && needs.dispatcher.outputs.matrix != '[]'
-    runs-on: ubuntu-latest  # 【已修正：将 runs-ok 修复为 runs-on】
+    runs-on: ubuntu-latest
     outputs:
       status: ${{ steps.judge.outputs.status }}
     steps:
