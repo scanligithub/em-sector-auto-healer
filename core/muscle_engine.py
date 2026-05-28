@@ -1,9 +1,9 @@
 import asyncio
 import json
 import os
-import sys
 import random
 import time
+import sys
 from loguru import logger
 from playwright.async_api import async_playwright
 
@@ -16,6 +16,7 @@ class MuscleEngine:
 
     async def fetch_sector(self, context, sid: str, name: str) -> bool:
         page = await context.new_page()
+        # fqt 设为 0（不复权）确保指数行情 100% 成功返回
         url = (
             f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
             f"?secid={sid}&ut=fa5fd1943c7b386f172d6893dbfba10b"
@@ -31,7 +32,7 @@ class MuscleEngine:
             payload = data["data"]
             with open(os.path.join(self.output_dir, f"{sid}.json"), "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False)
-            logger.success(f"🎯 [Job {self.chunk_id}] 完成: {name} ({sid})")
+            logger.success(f"🎯 [Job {self.chunk_id}] 成功: {name} ({sid})")
             return True
         except Exception:
             return False
@@ -39,11 +40,11 @@ class MuscleEngine:
             await page.close()
 
     async def run(self):
-        # 1. 载入分配给本节点的待办清单
+        # 1. 载入本节点的代办分块
         with open(f"chunks/chunk_{self.chunk_id}.json", "r", encoding="utf-8") as f:
             sectors = json.load(f)
             
-        pending_list = list(sectors)  # 剩余未完成名单
+        pending_list = [x.copy() for x in sectors]  # 独立深拷贝，跟踪生存状态
         
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
@@ -61,21 +62,27 @@ class MuscleEngine:
             
             for item in sectors:
                 sid, name = item["sid"], item["name"]
-                await asyncio.sleep(random.uniform(2.0, 3.5))  # 全量数据严格控流
+                await asyncio.sleep(random.uniform(2.0, 3.5))  # 大吞吐强制控流
+                
+                # 寻找当前 pending 列表里的对象引用
+                ref_item = next(x for x in pending_list if x["sid"] == sid)
                 
                 if await self.fetch_sector(context, sid, name):
-                    pending_list.remove(item)  # 成功后移出待办清单
+                    pending_list.remove(ref_item)  # 成功直接剔除出待办名单
                     consecutive_failures = 0
                 else:
                     consecutive_failures += 1
-                    logger.error(f"❌ [Job {self.chunk_id}] 挂起: {name} ({sid}) - 连败 {consecutive_failures}/2")
+                    # ⚠️ 失败了：给这个板块在这个节点上的失败计数加 1
+                    ref_item["fail_count"] += 1
+                    logger.error(f"❌ [Job {self.chunk_id}] 失败: {name} ({sid}) | 单体累计失败: {ref_item['fail_count']}/3")
+                    
                     if consecutive_failures >= 2:
-                        logger.critical(f"🚨 [Job {self.chunk_id}] 触发熔断！主动停止，保留未完成名单交由下一轮处理。")
+                        logger.critical(f"🚨 [Job {self.chunk_id}] 触发熔断！未运行板块保持原样退回队列。")
                         break
                         
             await browser.close()
             
-        # 2. 无论是否熔断，都将“剩余未完成名单”写入文件，供裁判 Job 汇总
+        # 2. 将当前节点未完成或失败（包含已更新 fail_count）的板块退回文件，供裁判汇总
         with open(f"failed_list_{self.chunk_id}.json", "w", encoding="utf-8") as f:
             json.dump(pending_list, f, ensure_ascii=False)
 
