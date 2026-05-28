@@ -100,8 +100,8 @@ def build_sector_catalog():
 
     sector_map = {}
     
-    # 采用温和且极速的 40 线程进行反向扫描
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=40)
+    # 采用温和且极速的 80 线程进行反向扫描
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=80)
     try:
         futures = {executor.submit(fetch_stock_sector_relations, session, s): s for s in stocks}
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="动态构建板块目录"):
