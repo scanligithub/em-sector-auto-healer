@@ -2,10 +2,10 @@ import asyncio
 import json
 import os
 import random
-import time
 import sys
+import urllib.request
+import urllib.error
 from loguru import logger
-from playwright.async_api import async_playwright
 
 class MuscleEngine:
     def __init__(self, chunk_id: int):
@@ -14,20 +14,33 @@ class MuscleEngine:
         os.makedirs(self.output_dir, exist_ok=True)
         self.data_limit = 1000000
 
-    async def fetch_sector(self, context, sid: str, name: str) -> bool:
-        page = await context.new_page()
-        # fqt 设为 0（不复权）确保指数行情 100% 成功返回
+    async def fetch_sector(self, sid: str, name: str) -> bool:
         url = (
             f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
             f"?secid={sid}&ut=fa5fd1943c7b386f172d6893dbfba10b"
             f"&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
             f"&klt=101&fqt=0&end=20500101&lmt={self.data_limit}"
         )
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36",
+            "Referer": "https://quote.eastmoney.com/"
+        }
+        
+        req = urllib.request.Request(url, headers=headers)
+        
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-            raw_text = await page.evaluate("() => document.body.innerText")
+            # 内部定义阻塞式的读取函数
+            def _perform_request():
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    return response.read().decode('utf-8')
+            
+            # 利用 asyncio.to_thread 将阻塞的网络 I/O 异步化
+            raw_text = await asyncio.to_thread(_perform_request)
+            
             data = json.loads(raw_text)
-            if not data or "data" not in data or data["data"] is None: return False
+            if not data or "data" not in data or data["data"] is None: 
+                return False
             
             payload = data["data"]
             with open(os.path.join(self.output_dir, f"{sid}.json"), "w", encoding="utf-8") as f:
@@ -35,42 +48,38 @@ class MuscleEngine:
             return True
         except Exception:
             return False
-        finally:
-            await page.close()
 
-    async def worker(self, worker_id: int, queue: asyncio.Queue, context, state: dict, lock: asyncio.Lock):
+    async def worker(self, worker_id: int, queue: asyncio.Queue, state: dict, lock: asyncio.Lock):
         """
-        独立的并发消费者协程
+        异步消费者协程
         """
         while not queue.empty():
-            # 1. 每次循环前，先无锁检查全局熔断信号
+            # 1. 检查全局熔断信号
             if state["circuit_broken"]:
                 break
 
-            # 2. 从队列中提取待办任务
+            # 2. 从队列中获取任务
             item = await queue.get()
             sid, name = item["sid"], item["name"]
 
-            # 3. 消费前进行短暂随机微控流，错开 5 个协程发起请求的瞬间
+            # 3. 错峰控流，避免 20 个协程同一微秒发起请求
             await asyncio.sleep(random.uniform(1.0, 3.0))
 
-            # 再次确认熔断状态
             if state["circuit_broken"]:
                 queue.task_done()
                 break
 
-            # 4. 执行实际下载
-            success = await self.fetch_sector(context, sid, name)
+            # 4. 执行网络请求
+            success = await self.fetch_sector(sid, name)
 
-            # 5. 协程安全地更新全局状态
+            # 5. 协程安全更新状态
             async with lock:
-                # 寻找生存名单中的对应引用
                 ref_item = next((x for x in state["pending_list"] if x["sid"] == sid), None)
 
                 if success:
                     if ref_item:
-                        state["pending_list"].remove(ref_item)  # 下载成功，从待办中剔除
-                    state["consecutive_failures"] = 0  # 成功则重置连续失败计数
+                        state["pending_list"].remove(ref_item)
+                    state["consecutive_failures"] = 0
                     logger.success(f"🎯 [Job {self.chunk_id} | Worker {worker_id}] 成功: {name} ({sid})")
                 else:
                     state["consecutive_failures"] += 1
@@ -78,7 +87,6 @@ class MuscleEngine:
                         ref_item["fail_count"] += 1
                         logger.error(f"❌ [Job {self.chunk_id} | Worker {worker_id}] 失败: {name} ({sid}) | 单体累计失败: {ref_item['fail_count']}/3")
 
-                    # 触发熔断阈值（连续失败2次）
                     if state["consecutive_failures"] >= 2:
                         state["circuit_broken"] = True
                         logger.critical(f"🚨 [Job {self.chunk_id} | Worker {worker_id}] 触发熔断！中止本节点后续所有任务。")
@@ -90,12 +98,12 @@ class MuscleEngine:
         with open(f"chunks/chunk_{self.chunk_id}.json", "r", encoding="utf-8") as f:
             sectors = json.load(f)
             
-        # 2. 初始化异步任务队列
+        # 2. 初始化任务队列
         queue = asyncio.Queue()
         for item in sectors:
             await queue.put(item)
 
-        # 3. 初始化全局共享状态与互斥锁（保障 pending_list 和计数器的并发安全性）
+        # 3. 初始化全局共享状态与互斥锁
         state = {
             "consecutive_failures": 0,
             "circuit_broken": False,
@@ -103,30 +111,28 @@ class MuscleEngine:
         }
         lock = asyncio.Lock()
         
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
-            context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36")
+        # 4. 建立轻量级预热请求
+        try:
+            def _warmup():
+                warmup_url = f"https://quote.eastmoney.com/bk/{sectors[0]['sid']}.html"
+                req = urllib.request.Request(warmup_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    resp.read(1024) # 仅读取前1KB建立连接缓存
+            await asyncio.to_thread(_warmup)
+        except Exception:
+            pass
             
-            # 会话预热
-            warmup = await context.new_page()
-            try:
-                await warmup.goto(f"https://quote.eastmoney.com/bk/{sectors[0]['sid']}.html", timeout=20000)
-                await asyncio.sleep(2)
-            except: pass
-            finally: await warmup.close()
-            
-            # 4. 并发启动 10 个 Worker 协程
-            num_workers = 10
-            workers = []
-            for w_id in range(num_workers):
-                task = asyncio.create_task(self.worker(w_id, queue, context, state, lock))
-                workers.append(task)
+        # 5. 并发启动 20 个 Worker 协程
+        num_workers = 20
+        workers = []
+        for w_id in range(num_workers):
+            task = asyncio.create_task(self.worker(w_id, queue, state, lock))
+            workers.append(task)
 
-            # 5. 等待所有并发 Worker 执行完毕
-            await asyncio.gather(*workers)
-            await browser.close()
+        # 6. 等待所有 Worker 运行完毕
+        await asyncio.gather(*workers)
             
-        # 6. 将当前节点未完成或失败（包含已更新 fail_count）的板块退回文件，供裁判汇总
+        # 7. 退回未完成任务
         with open(f"failed_list_{self.chunk_id}.json", "w", encoding="utf-8") as f:
             json.dump(state["pending_list"], f, ensure_ascii=False)
 
