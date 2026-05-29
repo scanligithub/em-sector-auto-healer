@@ -47,13 +47,13 @@ def main():
     num_chunks = 20
     matrix_indices = []
 
-    # 2. 核心分发策略：区分正常期与长尾期
+    # 2. 核心分发策略：区分正常期与长尾饱和期
     if total >= 400:
-        # 【正常期】：动态计算步长，彻底解决 1012 个板块切片截断的 Bug
+        # 【正常期】：动态计算步长，彻底平摊全量任务
         chunk_size = math.ceil(total / num_chunks)
         print(f"📦 [Dispatcher] 处于正常期分发，动态 Chunk 大小: {chunk_size}，确保全量覆盖。")
         
-        # 顺序平摊分块，无任何截断遗漏
+        # 顺序平摊分块
         padded_sectors = [x.copy() for x in sectors]
         for i in range(num_chunks):
             chunk_data = padded_sectors[i * chunk_size : (i + 1) * chunk_size]
@@ -62,18 +62,17 @@ def main():
                     json.dump(chunk_data, f, ensure_ascii=False)
                 matrix_indices.append(i)
     else:
-        # 【长尾期】：应用“动态收缩队列”与“轮转偏移分发”策略
-        # 设定重叠因子为 5（即每个标的在 5 个不同的 IP 节点上同时并发推进，撞大运尝试）
-        overlap_factor = 5
+        # 【长尾期】：饱和式轰炸策略 (Saturated Bombing)
+        # 设定一个 Job 能安全且高效执行的队列长度上限（例如 40 个任务）
+        target_queue_length = 40
         
-        # 动态收缩每个 Job 的队列长度，防止队列过长导致尾部被“提前熔断”饿死
-        chunk_size = math.ceil((total * overlap_factor) / num_chunks)
-        chunk_size = max(1, chunk_size)  # 确保队列最少有 1 个任务
+        # 核心修复：如果总数已经小于 40（比如只剩 10 个），则每个 Job 的队列长度就是 10，全部塞进去！
+        chunk_size = min(total, target_queue_length)
         
-        # 计算轮转偏移步长，保证 20 个 Job 队列的头部标的完全错开
+        # 偏移步长：确保 20 个节点的起始进攻位置完全均匀散开
         step = max(1, math.ceil(total / num_chunks))
         
-        print(f"🧩 [Dispatcher] 处于长尾期分发。剩余板块: {total}，动态收缩队列长度: {chunk_size}，偏移步长: {step}")
+        print(f"🧩 [Dispatcher] 长尾饱和轰炸模式启动！剩余板块: {total}，每个节点分配任务数: {chunk_size}，起点偏移步长: {step}")
         
         for i in range(num_chunks):
             # 基于当前节点索引计算独特的起始指针
