@@ -29,13 +29,9 @@ def main():
             print("❌ pending_list.json 不存在！异常中止。")
             sys.exit(1)
         with open("pending_list.json", "r", encoding="utf-8") as f:
-            raw_sectors = json.load(f)
+            sectors = json.load(f)
             
-        # 【死信过滤器】自动剔除已经连续失败 3 次及以上的“毒药板块”
-        sectors = [x for x in raw_sectors if x.get("fail_count", 0) < 3]
-        dead_count = len(raw_sectors) - len(sectors)
-        if dead_count > 0:
-            print(f"🚨 [Dispatcher] 检测到并永久剔除已确诊的 [ 毒药/死信板块 ] 共 {dead_count} 个。")
+        print(f"📝 本轮已完整加载上一轮遗留的 {len(sectors)} 个板块，无任何剔除过滤。")
 
     total = len(sectors)
     print(f"📊 [Dispatcher] 本轮待活跃下载板块数: {total}")
