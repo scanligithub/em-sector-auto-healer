@@ -46,6 +46,15 @@ class MuscleEngine:
             
         pending_list = [x.copy() for x in sectors]  # 独立深拷贝，跟踪生存状态
         
+        # === 核心改进：错峰预热随机延迟 (Cold-Start Jitter) ===
+        # 使用 1.5 秒作为梯度间隔，配合 0 ~ 3 秒的随机扰动，将 20 个并发节点平滑拉伸在 30 秒内启动
+        base_interval = 1.5
+        random_jitter = random.uniform(0.0, 3.0)
+        sleep_time = (self.chunk_id * base_interval) + random_jitter
+        logger.info(f"⏳ [Job {self.chunk_id}] 启动错峰预热，正在后台异步等待 {sleep_time:.2f} 秒...")
+        await asyncio.sleep(sleep_time)
+        # ===================================================
+
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
             context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36")
