@@ -115,8 +115,8 @@ class MuscleEngine:
             except: pass
             finally: await warmup.close()
             
-            # 4. 并发启动 5 个 Worker 协程
-            num_workers = 5
+            # 4. 并发启动 10 个 Worker 协程
+            num_workers = 10
             workers = []
             for w_id in range(num_workers):
                 task = asyncio.create_task(self.worker(w_id, queue, context, state, lock))
