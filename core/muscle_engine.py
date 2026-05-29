@@ -32,19 +32,76 @@ class MuscleEngine:
             payload = data["data"]
             with open(os.path.join(self.output_dir, f"{sid}.json"), "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False)
-            logger.success(f"🎯 [Job {self.chunk_id}] 成功: {name} ({sid})")
             return True
         except Exception:
             return False
         finally:
             await page.close()
 
+    async def worker(self, worker_id: int, queue: asyncio.Queue, context, state: dict, lock: asyncio.Lock):
+        """
+        独立的并发消费者协程
+        """
+        while not queue.empty():
+            # 1. 每次循环前，先无锁检查全局熔断信号
+            if state["circuit_broken"]:
+                break
+
+            # 2. 从队列中提取待办任务
+            item = await queue.get()
+            sid, name = item["sid"], item["name"]
+
+            # 3. 消费前进行短暂随机微控流，错开 5 个协程发起请求的瞬间
+            await asyncio.sleep(random.uniform(1.0, 3.0))
+
+            # 再次确认熔断状态
+            if state["circuit_broken"]:
+                queue.task_done()
+                break
+
+            # 4. 执行实际下载
+            success = await self.fetch_sector(context, sid, name)
+
+            # 5. 协程安全地更新全局状态
+            async with lock:
+                # 寻找生存名单中的对应引用
+                ref_item = next((x for x in state["pending_list"] if x["sid"] == sid), None)
+
+                if success:
+                    if ref_item:
+                        state["pending_list"].remove(ref_item)  # 下载成功，从待办中剔除
+                    state["consecutive_failures"] = 0  # 成功则重置连续失败计数
+                    logger.success(f"🎯 [Job {self.chunk_id} | Worker {worker_id}] 成功: {name} ({sid})")
+                else:
+                    state["consecutive_failures"] += 1
+                    if ref_item:
+                        ref_item["fail_count"] += 1
+                        logger.error(f"❌ [Job {self.chunk_id} | Worker {worker_id}] 失败: {name} ({sid}) | 单体累计失败: {ref_item['fail_count']}/3")
+
+                    # 触发熔断阈值（连续失败2次）
+                    if state["consecutive_failures"] >= 2:
+                        state["circuit_broken"] = True
+                        logger.critical(f"🚨 [Job {self.chunk_id} | Worker {worker_id}] 触发熔断！中止本节点后续所有任务。")
+
+            queue.task_done()
+
     async def run(self):
         # 1. 载入本节点的代办分块
         with open(f"chunks/chunk_{self.chunk_id}.json", "r", encoding="utf-8") as f:
             sectors = json.load(f)
             
-        pending_list = [x.copy() for x in sectors]  # 独立深拷贝，跟踪生存状态
+        # 2. 初始化异步任务队列
+        queue = asyncio.Queue()
+        for item in sectors:
+            await queue.put(item)
+
+        # 3. 初始化全局共享状态与互斥锁（保障 pending_list 和计数器的并发安全性）
+        state = {
+            "consecutive_failures": 0,
+            "circuit_broken": False,
+            "pending_list": [x.copy() for x in sectors]
+        }
+        lock = asyncio.Lock()
         
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
@@ -58,33 +115,20 @@ class MuscleEngine:
             except: pass
             finally: await warmup.close()
             
-            consecutive_failures = 0
-            
-            for item in sectors:
-                sid, name = item["sid"], item["name"]
-                await asyncio.sleep(random.uniform(2.0, 3.5))  # 大吞吐强制控流
-                
-                # 寻找当前 pending 列表里的对象引用
-                ref_item = next(x for x in pending_list if x["sid"] == sid)
-                
-                if await self.fetch_sector(context, sid, name):
-                    pending_list.remove(ref_item)  # 成功直接剔除出待办名单
-                    consecutive_failures = 0
-                else:
-                    consecutive_failures += 1
-                    # ⚠️ 失败了：给这个板块在这个节点上的失败计数加 1
-                    ref_item["fail_count"] += 1
-                    logger.error(f"❌ [Job {self.chunk_id}] 失败: {name} ({sid}) | 单体累计失败: {ref_item['fail_count']}/3")
-                    
-                    if consecutive_failures >= 2:
-                        logger.critical(f"🚨 [Job {self.chunk_id}] 触发熔断！未运行板块保持原样退回队列。")
-                        break
-                        
+            # 4. 并发启动 5 个 Worker 协程
+            num_workers = 5
+            workers = []
+            for w_id in range(num_workers):
+                task = asyncio.create_task(self.worker(w_id, queue, context, state, lock))
+                workers.append(task)
+
+            # 5. 等待所有并发 Worker 执行完毕
+            await asyncio.gather(*workers)
             await browser.close()
             
-        # 2. 将当前节点未完成或失败（包含已更新 fail_count）的板块退回文件，供裁判汇总
+        # 6. 将当前节点未完成或失败（包含已更新 fail_count）的板块退回文件，供裁判汇总
         with open(f"failed_list_{self.chunk_id}.json", "w", encoding="utf-8") as f:
-            json.dump(pending_list, f, ensure_ascii=False)
+            json.dump(state["pending_list"], f, ensure_ascii=False)
 
 if __name__ == "__main__":
     chunk_id = int(sys.argv[1])
