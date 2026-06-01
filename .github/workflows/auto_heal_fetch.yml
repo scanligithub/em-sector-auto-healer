@@ -12,8 +12,8 @@ on:
         required: false
         default: ''
   # 可以随时打开定时触发，每天收盘后自动更新：
-  # schedule:
-  #   - cron: '0 10 * * 1-5' # 每天北京时间18点运行
+  schedule:
+    - cron: '0 15 * * 1-5' # 每天北京时间23点运行
 
 permissions:
   contents: write
