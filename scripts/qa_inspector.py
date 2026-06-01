@@ -113,7 +113,7 @@ def main():
     for item in report_data:
         md_content += f"| **{item['name']}** | {item['rows']:,} | {item['targets']:,} | {item['daterange']} | {item['size']} | **{item['anomalies']}** | `{item['fields']}` |\n"
 
-    # 用一个完整的三引号包裹后面所有的说明文档与代码示例，彻底杜绝编译错误
+    # 干净的多行文本拼接，无任何转义斜杠
     md_content += """
 ## 📖 二、数据字典 (Data Dictionary)
 
