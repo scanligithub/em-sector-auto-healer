@@ -11,15 +11,15 @@ on:
         description: 'Comma separated historical run IDs (Internal use)'
         required: false
         default: ''
+  # 可以随时打开定时触发，每天收盘后自动更新：
+  # schedule:
+  #   - cron: '0 10 * * 1-5' # 每天北京时间18点运行
 
 permissions:
   contents: write
   actions: write
 
 jobs:
-  # ==========================================
-  # 阶段 1：调度分发与元数据提取
-  # ==========================================
   dispatcher:
     runs-on: ubuntu-latest
     outputs:
@@ -31,7 +31,6 @@ jobs:
           python-version: "3.10"
       - run: pip install -r requirements.txt
       
-      # 非首发轮，自动拉取上一接力棒的 pending_list 状态文件
       - name: Download Pending List
         if: ${{ github.event.inputs.attempt != '1' && github.event.inputs.attempt != '' }}
         uses: dawidd6/action-download-artifact@v3
@@ -48,7 +47,6 @@ jobs:
           python scripts/dispatcher.py
           echo "matrix=$(cat matrix.json)" >> $GITHUB_OUTPUT
           
-      # [核心] 仅在第一轮，把 Builder 产生的 4 个元数据 JSON 截获并送入专属通道
       - name: Upload Metadata
         if: ${{ github.event.inputs.attempt == '1' || github.event.inputs.attempt == '' }}
         uses: actions/upload-artifact@v4
@@ -64,9 +62,6 @@ jobs:
           path: chunks/*.json
           retention-days: 1
 
-  # ==========================================
-  # 阶段 2：20 节点分布式抓取
-  # ==========================================
   fetch-cluster:
     needs: dispatcher
     runs-on: ubuntu-latest
@@ -94,7 +89,6 @@ jobs:
       - name: Execute Node Engine
         run: python core/muscle_engine.py ${{ matrix.chunk_id }}
         
-      # 数据包加上当前的 github.run_id 防止多轮重试下载时发生命名覆盖冲突
       - name: Upload Success Data
         uses: actions/upload-artifact@v4
         with:
@@ -109,9 +103,6 @@ jobs:
           path: failed_list_${{ matrix.chunk_id }}.json
           retention-days: 1
 
-  # ==========================================
-  # 阶段 3：裁判所（判定接力与收尾）
-  # ==========================================
   aggregator:
     needs: [dispatcher, fetch-cluster]
     if: always() && needs.dispatcher.outputs.matrix != '[]'
@@ -131,7 +122,6 @@ jobs:
           merge-multiple: true
           path: .
           
-      # 物理下载本轮所有成功的 JSON 数据，用来做“物理真实性去重”
       - name: Download Current Success Data
         uses: actions/download-artifact@v4
         with:
@@ -153,15 +143,14 @@ jobs:
           NEW_CHAIN="${CHAIN_IDS},${{ github.run_id }}"
           NEW_CHAIN=$(echo $NEW_CHAIN | sed 's/^,//')
           
-          # 最大允许接力 10 轮
           if [ "$REMAINING" -gt "0" ] && [ "$CURRENT_ATTEMPT" -lt "10" ]; then
-            echo "💥 存在未下载完的数据，触发第 $((CURRENT_ATTEMPT+1)) 轮接力!"
+            echo "💥 存在未下载完的数据，触发接力!"
             echo "status=CONTINUE" >> $GITHUB_OUTPUT
             gh workflow run auto_heal_fetch.yml \
               -f attempt=$((CURRENT_ATTEMPT+1)) \
               -f chain_run_ids="$NEW_CHAIN"
           else
-            echo "✅ 队列已全部抽干。向后续步骤下发 Release 指令！"
+            echo "✅ 队列抽干，下发 Release 指令！"
             echo "status=DONE" >> $GITHUB_OUTPUT
             echo "$NEW_CHAIN" > final_chain.txt
           fi
@@ -180,9 +169,6 @@ jobs:
           name: final-chain-artifact
           path: final_chain.txt
 
-  # ==========================================
-  # 阶段 4：跨运行数据合并与发布 (Releaser)
-  # ==========================================
   releaser:
     needs: aggregator
     if: needs.aggregator.outputs.status == 'DONE'
@@ -204,23 +190,27 @@ jobs:
           CHAIN_IDS=$(cat final_chain.txt)
           IFS=',' read -ra ADDR <<< "$CHAIN_IDS"
           
-          # 1. 回收所有接力轮次产生的 K 线碎片
           for id in "${ADDR[@]}"; do
-            echo "⬇️ 正在跨节点回收 Run ID: $id 产生的全部 K线碎片..."
+            echo "⬇️ 回收 Run ID: $id K线碎片..."
             gh run download $id --pattern "success-data-$id-chunk-*" --dir final_dataset --repo ${{ github.repository }} || true
           done
           
-          # 执行物理扁平化及同名覆盖去重 (把散落在各子文件夹的 K 线直接铺平到 final_dataset 根目录)
           find final_dataset -type f -name "*.json" -exec mv {} final_dataset/ \;
           find final_dataset -type d -empty -delete
           
-          # 2. 从接力链条的第一轮 (First Run) 强行追溯并下载 Metadata
           FIRST_RUN_ID="${ADDR[0]}"
-          echo "⬇️ 正在从首轮源头 (Run ID: $FIRST_RUN_ID) 跨时空回收元数据大名单..."
+          echo "⬇️ 从首轮回收元数据大名单..."
           mkdir -p final_dataset/metadata
           gh run download $FIRST_RUN_ID -n metadata-artifact --dir final_dataset/metadata --repo ${{ github.repository }} || true
-          
-          # 3. Zip 打包并发布
+
+      # [新增] ==== 运行深度质检探针 ====
+      - name: QA Inspector (深度数据质检)
+        run: python scripts/qa_inspector.py
+
+      - name: Create Zip and Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
           cd final_dataset
           zip -r ../Full_Sector_Klines.zip .
           cd ..
@@ -228,4 +218,4 @@ jobs:
           DATE_TAG=$(date +'%Y%m%d_%H%M%S')
           gh release create "sector-data-${DATE_TAG}" Full_Sector_Klines.zip \
             --title "Sector Klines & Metadata ($DATE_TAG)" \
-            --notes "自愈接力系统全量归档。内含全部板块的完整历史 K线 以及包含最新成分股映射表（components.json）在内的 4 份核心元数据大名单。"
+            --notes "自愈接力系统全量归档。请在 Actions 页面查看本次提取的数据质量质检报告 (QA Summary)。"
