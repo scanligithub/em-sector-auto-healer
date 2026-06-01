@@ -113,75 +113,126 @@ def main():
     for item in report_data:
         md_content += f"| **{item['name']}** | {item['rows']:,} | {item['targets']:,} | {item['daterange']} | {item['size']} | **{item['anomalies']}** | `{item['fields']}` |\n"
 
-    # 干净的多行文本拼接，无任何转义斜杠
-    md_content += """
-## 📖 二、数据字典 (Data Dictionary)
+    # [绝对安全的数组拼接模式，彻底杜绝 SyntaxError]
+    doc_lines = [
+        "",
+        "## 📖 二、数据字典 (Data Dictionary)",
+        "",
+        "### 1. K 线数据文件 (如 `90.BK1043.json`)",
+        "东方财富原始下发的数据格式中，`klines` 字段为一个由逗号分隔的字符串数组。切分后，各个位置对应的物理含义如下：",
+        "*   **0. date (日期)**: 交易日期 (如 `2024-03-01`)",
+        "*   **1. open (开盘价)**: 当日开盘指数",
+        "*   **2. close (收盘价)**: 当日收盘指数",
+        "*   **3. high (最高价)**: 当日最高指数",
+        "*   **4. low (最低价)**: 当日最低指数",
+        "*   **5. volume (成交量)**: 单位：手 (1手=100股)",
+        "*   **6. amount (成交额)**: 单位：元",
+        "*   **7. amplitude (振幅)**: 单位：%",
+        "*   **8. pctChg (涨跌幅)**: 单位：% (如 1.5 表示涨 1.5%)",
+        "*   **9. change (涨跌额)**: 指数变动绝对值",
+        "*   **10. turnover (换手率)**: 单位：%",
+        "",
+        "*(注：系统抓取时设定了 `fqt=0` 不复权模式，以获取绝对真实的指数行情。)*",
+        "",
+        "### 2. 板块成分股映射 (`metadata/components.json`)",
+        "关系型扁平数组，记录了全市场板块与股票的父子包含关系。",
+        "*   **`sector_id`**: 板块编码（带市场前缀，例如 `90.BK1043`，此编码与 K 线文件名完美对应）。",
+        "*   **`stock_id`**: 标准化个股代码（带市场前缀，例如 `SH600000`, `SZ000001`）。",
+        "*   **`stock_name`**: 个股中文简称，方便人类阅读和日志打印。",
+        "",
+        "### 3. 三大分类名单 (`metadata/regions.json` 等)",
+        "*   **`sid`**: 板块唯一编码 (如 `90.BK1043`)。",
+        "*   **`name`**: 板块名称 (如 `银行业`)。",
+        "*   **`type`**: 板块类型标签 (`Region`, `Industry`, `Concept`)。",
+        "",
+        "---",
+        "",
+        "## 💻 三、量化投研使用指南 (Quick Start with Polars)",
+        "",
+        "推荐使用 **Polars** 进行极速数据清洗和截面计算。以下提供将原始 JSON 转化为标准关系型 DataFrame 的标准范式。",
+        "",
+        "### 1. 解析板块 K 线字符串",
+        "```python",
+        "import polars as pl",
+        "import json",
+        "",
+        "# 读取单个板块数据",
+        "with open('90.BK1043.json', 'r', encoding='utf-8') as f:",
+        "    data = json.load(f)",
+        "",
+        "sector_name = data.get('name', 'Unknown')",
+        "sector_id = data.get('code', 'Unknown')",
+        "",
+        "# 1. 拆解东财逗号分隔的字符串",
+        "rows = [x.split(',') for x in data['klines']]",
+        "cols = ['date', 'open', 'close', 'high', 'low', 'volume', 'amount', 'amplitude', 'pctChg', 'change', 'turnover']",
+        "",
+        "# 2. 生成 Polars DataFrame，并极速转换数据类型",
+        "df = pl.DataFrame(rows, schema=cols, orient='row').with_columns([",
+        "    pl.col('date').str.strptime(pl.Date, '%Y-%m-%d'),",
+        "    pl.col('open').cast(pl.Float64),",
+        "    pl.col('close').cast(pl.Float64),",
+        "    pl.col('high').cast(pl.Float64),",
+        "    pl.col('low').cast(pl.Float64),",
+        "    pl.col('volume').cast(pl.Float64),",
+        "    pl.col('amount').cast(pl.Float64),",
+        "    pl.col('pctChg').cast(pl.Float64)",
+        "])",
+        "",
+        "# 3. 补充板块维度信息",
+        "df = df.with_columns([",
+        "    pl.lit(sector_id).alias('sector_id'),",
+        "    pl.lit(sector_name).alias('sector_name')",
+        "])",
+        "",
+        "print(df.head())",
+        "```",
+        "",
+        "### 2. 映射关联成分股 (Join 操作)",
+        "在构建截面因子（如板块轮动、行业中性化）时，利用扁平化的 `components.json` 可以一行代码完成归属：",
+        "```python",
+        "import polars as pl",
+        "",
+        "# 极速加载映射表",
+        "mapping_df = pl.read_json('metadata/components.json')",
+        "",
+        "# 假设您已有一个包含个股收盘价的行情表 stock_klines_df ",
+        "# (必需包含 'stock_id' 字段，如 SH600000)",
+        "# 直接关联获取每个个股所属的板块：",
+        "joined_df = stock_klines_df.join(mapping_df, on='stock_id', how='inner')",
+        "",
+        "# 示例：计算每日各板块的等权平均收盘价",
+        "sector_daily_mean = (",
+        "    joined_df",
+        "    .group_by(['date', 'sector_id'])",
+        "    .agg(",
+        "        pl.col('close').mean().alias('sector_mean_close')",
+        "    )",
+        ")",
+        "```"
+    ]
 
-### 1. K 线数据文件 (如 `90.BK1043.json`)
-东方财富原始下发的数据格式中，`klines` 字段为一个由逗号分隔的字符串数组。切分后，各个位置对应的物理含义如下：
-*   **0. date (日期)**: 交易日期 (如 `2024-03-01`)
-*   **1. open (开盘价)**: 当日开盘指数
-*   **2. close (收盘价)**: 当日收盘指数
-*   **3. high (最高价)**: 当日最高指数
-*   **4. low (最低价)**: 当日最低指数
-*   **5. volume (成交量)**: 单位：手 (1手=100股)
-*   **6. amount (成交额)**: 单位：元
-*   **7. amplitude (振幅)**: 单位：%
-*   **8. pctChg (涨跌幅)**: 单位：% (如 1.5 表示涨 1.5%)
-*   **9. change (涨跌额)**: 指数变动绝对值
-*   **10. turnover (换手率)**: 单位：%
+    md_content += "\n".join(doc_lines)
 
-*(注：系统抓取时设定了 `fqt=0` 不复权模式，以获取绝对真实的指数行情。)*
+    # ==========================================
+    # 5. 输出落地
+    # ==========================================
+    
+    # 动作 1：在控制台打印
+    print("\n" + md_content)
+    
+    # 动作 2：持久化落盘到 metadata 目录中（连同 ZIP 一起打包给用户）
+    report_path = os.path.join(metadata_dir, "QA_Report_and_Usage.md")
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(md_content)
+    print(f"✅ [QA Inspector] 详细数据字典与使用指南已落盘至: {report_path}")
+    
+    # 动作 3：挂载到 GitHub Actions 的 Summary 墙上（可视化展示）
+    step_summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step_summary_file:
+        with open(step_summary_file, "a", encoding="utf-8") as f:
+            f.write(md_content + "\n")
+        print("✅ [QA Inspector] 质检看板已成功挂载至 GitHub Summary 墙！")
 
-### 2. 板块成分股映射 (`metadata/components.json`)
-关系型扁平数组，记录了全市场板块与股票的父子包含关系。
-*   **`sector_id`**: 板块编码（带市场前缀，例如 `90.BK1043`，此编码与 K 线文件名完美对应）。
-*   **`stock_id`**: 标准化个股代码（带市场前缀，例如 `SH600000`, `SZ000001`）。
-*   **`stock_name`**: 个股中文简称，方便人类阅读和日志打印。
-
-### 3. 三大分类名单 (`metadata/regions.json` 等)
-*   **`sid`**: 板块唯一编码 (如 `90.BK1043`)。
-*   **`name`**: 板块名称 (如 `银行业`)。
-*   **`type`**: 板块类型标签 (`Region`, `Industry`, `Concept`)。
-
----
-
-## 💻 三、量化投研使用指南 (Quick Start with Polars)
-
-推荐使用 **Polars** 进行极速数据清洗和截面计算。以下提供将原始 JSON 转化为标准关系型 DataFrame 的标准范式。
-
-### 1. 解析板块 K 线字符串
-```python
-import polars as pl
-import json
-
-# 读取单个板块数据
-with open("90.BK1043.json", "r", encoding="utf-8") as f:
-    data = json.load(f)
-
-sector_name = data.get("name", "Unknown")
-sector_id = data.get("code", "Unknown")
-
-# 1. 拆解东财逗号分隔的字符串
-rows = [x.split(',') for x in data["klines"]]
-cols = ["date", "open", "close", "high", "low", "volume", "amount", "amplitude", "pctChg", "change", "turnover"]
-
-# 2. 生成 Polars DataFrame，并极速转换数据类型
-df = pl.DataFrame(rows, schema=cols, orient="row").with_columns([
-    pl.col("date").str.strptime(pl.Date, "%Y-%m-%d"),
-    pl.col("open").cast(pl.Float64),
-    pl.col("close").cast(pl.Float64),
-    pl.col("high").cast(pl.Float64),
-    pl.col("low").cast(pl.Float64),
-    pl.col("volume").cast(pl.Float64),
-    pl.col("amount").cast(pl.Float64),
-    pl.col("pctChg").cast(pl.Float64)
-])
-
-# 3. 补充板块维度信息
-df = df.with_columns([
-    pl.lit(sector_id).alias("sector_id"),
-    pl.lit(sector_name).alias("sector_name")
-])
-
-print(df.head())
+if __name__ == "__main__":
+    main()
