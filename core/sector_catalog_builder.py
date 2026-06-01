@@ -2,6 +2,8 @@ import concurrent.futures
 import time
 import gc
 import random
+import os
+import json
 from collections import Counter
 from datetime import datetime, timedelta
 import baostock as bs
@@ -103,12 +105,13 @@ def fetch_stock_sector_relations(session: requests.Session, stock_info):
             for x in items if x.get("f12", "").startswith("BK")]
 
 def build_sector_universe():
-    """核心第一步：自下而上反推板块全集"""
+    """核心第一步：自下而上反推板块全集，并拦截成分映射"""
     session = create_session()
     stocks = get_stock_seeds_from_baostock() or get_stock_seeds_from_eastmoney(session)
     if not stocks: raise RuntimeError("无法获取任何个股种子")
 
     sector_map = {}
+    components_mapping = []  # [新增] 拦截成分股映射数据
     
     # 显式控制线程池生命周期，40个并发安全拉取
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=UNIVERSE_WORKERS)
@@ -116,12 +119,25 @@ def build_sector_universe():
         futures = {executor.submit(fetch_stock_sector_relations, session, s): s for s in stocks}
         
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="动态反推板块大名单"):
+            # [新增] 获取这只股票的初始信息
+            stock_info = futures[future]
+            bs_code, stock_name = stock_info
+            # 将 sh.600000 转换为量化标准格式 SH600000
+            std_stock_code = bs_code.upper().replace(".", "")
+            
             try:
                 relations = future.result()
                 for rel in relations:
                     code = rel["sector_code"]
                     if code not in sector_map:
                         sector_map[code] = {"code": code, "name": rel["sector_name"]}
+                        
+                    # [新增] 顺手牵羊：记录成分股对应关系
+                    components_mapping.append({
+                        "sector_id": f"90.{code}",  # 保证与 K 线的 sid 格式一致
+                        "stock_id": std_stock_code,
+                        "stock_name": stock_name
+                    })
             except: pass
 
     except Exception as e:
@@ -133,7 +149,7 @@ def build_sector_universe():
         gc.collect() 
         executor.shutdown(wait=False)
 
-    return sector_map
+    return sector_map, components_mapping  # [修改] 同时返回反推名单和映射大表
 
 def fetch_single_dimension(session: requests.Session, fs_code, fid, po):
     """【官方方案二直连版】单维度前100名探测"""
@@ -206,7 +222,7 @@ def fetch_baseinfo_type(session: requests.Session, code: str):
 def build_sector_catalog():
     """采用代码库 1 的原装方案二构建完整板块目录"""
     # 1. 自下而上反推基础大名单 (确保不漏)
-    universe_map = build_sector_universe()
+    universe_map, components_mapping = build_sector_universe() # [修改] 接收映射表
     
     # 2. 官方三维度大目录扫描 (确保分类)
     targets = {"Industry": "m:90 t:2", "Concept": "m:90 t:3", "Region": "m:90 t:1"}
@@ -241,12 +257,37 @@ def build_sector_catalog():
 
     # 4. 最终汇总输出
     all_sectors = []
+    regions = []
+    industries = []
+    concepts = []
+    
     for code, info in universe_map.items():
-        all_sectors.append({
+        t = typed_map.get(code, {}).get("type", "Unknown") # 兜底未知
+        sector_obj = {
             "sid": f"90.{code}",
             "name": info["name"],
-            "type": typed_map.get(code, {}).get("type", "Unknown") # 兜底未知
-        })
+            "type": t
+        }
+        all_sectors.append(sector_obj)
+        
+        # [新增] 分类归档
+        if t == "Region": regions.append(sector_obj)
+        elif t == "Industry": industries.append(sector_obj)
+        elif t == "Concept": concepts.append(sector_obj)
+    
+    # [新增] ==== 元数据落盘逻辑 ====
+    os.makedirs("metadata", exist_ok=True)
+    with open("metadata/components.json", "w", encoding="utf-8") as f:
+        json.dump(components_mapping, f, ensure_ascii=False)
+    with open("metadata/regions.json", "w", encoding="utf-8") as f:
+        json.dump(regions, f, ensure_ascii=False)
+    with open("metadata/industries.json", "w", encoding="utf-8") as f:
+        json.dump(industries, f, ensure_ascii=False)
+    with open("metadata/concepts.json", "w", encoding="utf-8") as f:
+        json.dump(concepts, f, ensure_ascii=False)
+        
+    print(f"📦 [Metadata] 已成功截获并保存 {len(components_mapping)} 条成分股映射及三大分类名单。")
+    # ==============================
     
     counts = Counter(x["type"] for x in all_sectors)
     print(f"[+] 动态分类目录同步完毕 | 板块总数: {len(all_sectors)} | 分类统计: {dict(counts)}")
