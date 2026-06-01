@@ -105,7 +105,6 @@ def main():
     # 4. 组装《数据质量报告与使用指南》长篇 Markdown
     # ==========================================
     
-    # [模块 A: 质检报告看板]
     md_content = "# 📊 板块数据质量深度质检与使用指南\n\n"
     md_content += f"> **生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (UTC)\n\n"
     md_content += "## 📈 一、数据产物概览\n\n"
@@ -114,7 +113,7 @@ def main():
     for item in report_data:
         md_content += f"| **{item['name']}** | {item['rows']:,} | {item['targets']:,} | {item['daterange']} | {item['size']} | **{item['anomalies']}** | `{item['fields']}` |\n"
 
-    # [模块 B: 数据字典]
+    # 用一个完整的三引号包裹后面所有的说明文档与代码示例，彻底杜绝编译错误
     md_content += """
 ## 📖 二、数据字典 (Data Dictionary)
 
@@ -146,10 +145,7 @@ def main():
 *   **`type`**: 板块类型标签 (`Region`, `Industry`, `Concept`)。
 
 ---
-"""
 
-    # [模块 C: Polars 极速接入代码]
-    md_content += """
 ## 💻 三、量化投研使用指南 (Quick Start with Polars)
 
 推荐使用 **Polars** 进行极速数据清洗和截面计算。以下提供将原始 JSON 转化为标准关系型 DataFrame 的标准范式。
