@@ -112,8 +112,8 @@ class MuscleEngine:
             except: pass
             finally: await warmup.close()
             
-            # 4. 采用之前测试稳定的 1 并发 Worker
-            num_workers = 1
+            # 4. 采用之前测试稳定的 10 并发 Worker
+            num_workers = 10
             workers = []
             for w_id in range(num_workers):
                 task = asyncio.create_task(self.worker(w_id, queue, context, state, lock))
