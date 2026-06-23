@@ -251,11 +251,13 @@ jobs:
             DATE_TAG=$(date +'%Y-%m-%d %H:%M:%S')
             echo "🚀 正在更新/创建 Release [${RELEASE_TAG}]..."
             
-            # 使用 --clobber 参数，如果 release 或 资产已存在则直接覆盖，同时更新发布说明
+            # 🧹 清理旧的 Release（即使不存在也会优雅跳过，不报错）
+            gh release delete "${RELEASE_TAG}" --yes --repo "${{ github.repository }}" 2>/dev/null || true
+            
+            # 重新创建全新同名 Release
             gh release create "${RELEASE_TAG}" "${NEW_ZIP}" \
               --title "Sector Klines & Metadata (Latest)" \
-              --notes "自愈接力系统全量归档。更新时间: ${DATE_TAG} (UTC)。请在 Actions 页面查看本次提取的数据质量质检报告 (QA Summary)。" \
-              --clobber
+              --notes "自愈接力系统全量归档。更新时间: ${DATE_TAG} (UTC)。请在 Actions 页面查看本次提取的数据质量质检报告 (QA Summary)。"
               
             echo "🎉 Release [${RELEASE_TAG}] 更新覆盖完毕。"
           else
