@@ -203,19 +203,61 @@ jobs:
           mkdir -p final_dataset/metadata
           gh run download $FIRST_RUN_ID -n metadata-artifact --dir final_dataset/metadata --repo ${{ github.repository }} || true
 
-      # [新增] ==== 运行深度质检探针 ====
       - name: QA Inspector (深度数据质检)
         run: python scripts/qa_inspector.py
 
-      - name: Create Zip and Release
+      - name: Compare Size and Create/Overwrite Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 1. 打包新生成的全量数据集
           cd final_dataset
           zip -r ../Full_Sector_Klines.zip .
           cd ..
           
-          DATE_TAG=$(date +'%Y%m%d_%H%M%S')
-          gh release create "sector-data-${DATE_TAG}" Full_Sector_Klines.zip \
-            --title "Sector Klines & Metadata ($DATE_TAG)" \
-            --notes "自愈接力系统全量归档。请在 Actions 页面查看本次提取的数据质量质检报告 (QA Summary)。"
+          NEW_ZIP="Full_Sector_Klines.zip"
+          OLD_ZIP="Old_Full_Sector_Klines.zip"
+          RELEASE_TAG="latest"
+          SHOULD_RELEASE=true
+          
+          echo "🔍 检查是否存在既有 Release [${RELEASE_TAG}]..."
+          if gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "ℹ️ 找到已存在的 Release [${RELEASE_TAG}]，尝试下载旧版本进行大小校验..."
+            
+            if gh release download "${RELEASE_TAG}" --pattern "${NEW_ZIP}" --output "${OLD_ZIP}" --repo "${{ github.repository }}" --clobber; then
+              if [ -f "${OLD_ZIP}" ]; then
+                NEW_SIZE=$(stat -c%s "${NEW_ZIP}")
+                OLD_SIZE=$(stat -c%s "${OLD_ZIP}")
+                echo "📊 新 ZIP 大小: ${NEW_SIZE} 字节"
+                echo "📊 旧 ZIP 大小: ${OLD_SIZE} 字节"
+                
+                if [ "$NEW_SIZE" -lt "$OLD_SIZE" ]; then
+                  echo "⚠️ 警告：当前新生成文件大小 (${NEW_SIZE} 字节) 小于已有老版本 (${OLD_SIZE} 字节)！"
+                  echo "🚫 放弃本次更新，保持 Release 中的老版本文件。"
+                  SHOULD_RELEASE=false
+                else
+                  echo "✅ 校验通过：新文件大小符合更新标准。"
+                fi
+              fi
+            else
+              echo "⚠️ 无法下载旧版资产或该 Release 中尚未包含文件，将执行全新覆盖。"
+            fi
+          else
+            echo "ℹ️ 未检测到既有 Release [${RELEASE_TAG}]，将执行首次创建。"
+          fi
+          
+          # 3. 执行 Release 写入
+          if [ "$SHOULD_RELEASE" = true ]; then
+            DATE_TAG=$(date +'%Y-%m-%d %H:%M:%S')
+            echo "🚀 正在更新/创建 Release [${RELEASE_TAG}]..."
+            
+            # 使用 --clobber 参数，如果 release 或 资产已存在则直接覆盖，同时更新发布说明
+            gh release create "${RELEASE_TAG}" "${NEW_ZIP}" \
+              --title "Sector Klines & Metadata (Latest)" \
+              --notes "自愈接力系统全量归档。更新时间: ${DATE_TAG} (UTC)。请在 Actions 页面查看本次提取的数据质量质检报告 (QA Summary)。" \
+              --clobber
+              
+            echo "🎉 Release [${RELEASE_TAG}] 更新覆盖完毕。"
+          else
+            echo "⏭️ 已跳过 Release 资产覆盖步骤，维持原有历史数据。"
+          fi
