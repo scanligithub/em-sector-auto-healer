@@ -217,19 +217,23 @@ jobs:
           
           NEW_ZIP="Full_Sector_Klines.zip"
           OLD_ZIP="Old_Full_Sector_Klines.zip"
-          RELEASE_TAG="latest"
+          TARGET_TAG="latest" # 我们未来统一使用的固定唯一 Tag 名
           SHOULD_RELEASE=true
           
-          echo "🔍 检查是否存在既有 Release [${RELEASE_TAG}]..."
-          if gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "ℹ️ 找到已存在的 Release [${RELEASE_TAG}]，尝试下载旧版本进行大小校验..."
+          # 2. 动态探测仓库中当前标有 "Latest" 状态的真实 Release Tag 名
+          echo "🔍 正在动态探测现存的最新的 Release..."
+          EXISTING_TAG=$(gh release view --repo "${{ github.repository }}" --json tagName --jq '.tagName' 2>/dev/null || echo "")
+          
+          if [ -n "${EXISTING_TAG}" ]; then
+            echo "ℹ️ 发现现存最新的 Release，其物理 Tag 为: [${EXISTING_TAG}]"
+            echo "📥 正在尝试下载该 Release 中的旧版 ZIP 资产..."
             
-            if gh release download "${RELEASE_TAG}" --pattern "${NEW_ZIP}" --output "${OLD_ZIP}" --repo "${{ github.repository }}" --clobber; then
+            if gh release download "${EXISTING_TAG}" --pattern "${NEW_ZIP}" --output "${OLD_ZIP}" --repo "${{ github.repository }}" --clobber; then
               if [ -f "${OLD_ZIP}" ]; then
                 NEW_SIZE=$(stat -c%s "${NEW_ZIP}")
                 OLD_SIZE=$(stat -c%s "${OLD_ZIP}")
-                echo "📊 新 ZIP 大小: ${NEW_SIZE} 字节"
-                echo "📊 旧 ZIP 大小: ${OLD_SIZE} 字节"
+                echo "📊 新 ZIP 物理大小: ${NEW_SIZE} 字节"
+                echo "📊 旧 ZIP 物理大小: ${OLD_SIZE} 字节"
                 
                 if [ "$NEW_SIZE" -lt "$OLD_SIZE" ]; then
                   echo "⚠️ 警告：当前新生成文件大小 (${NEW_SIZE} 字节) 小于已有老版本 (${OLD_SIZE} 字节)！"
@@ -240,26 +244,33 @@ jobs:
                 fi
               fi
             else
-              echo "⚠️ 无法下载旧版资产或该 Release 中尚未包含文件，将执行全新覆盖。"
+              echo "⚠️ 无法下载旧版资产或该 Release 中尚未包含文件，将直接执行全新覆盖。"
             fi
           else
-            echo "ℹ️ 未检测到既有 Release [${RELEASE_TAG}]，将执行首次创建。"
+            echo "ℹ️ 未检测到任何既有 Release，将执行首次创建。"
           fi
           
-          # 3. 执行 Release 写入
+          # 3. 执行 Release 写入与物理覆盖
           if [ "$SHOULD_RELEASE" = true ]; then
             DATE_TAG=$(date +'%Y-%m-%d %H:%M:%S')
-            echo "🚀 正在更新/创建 Release [${RELEASE_TAG}]..."
             
-            # 🧹 清理旧的 Release（即使不存在也会优雅跳过，不报错）
-            gh release delete "${RELEASE_TAG}" --yes --repo "${{ github.repository }}" 2>/dev/null || true
+            # 🧹 如果检测到旧 Release（不论是日期 Tag 还是 "latest"），将其彻底清理
+            if [ -n "${EXISTING_TAG}" ]; then
+              echo "🧹 清理旧的 Release [${EXISTING_TAG}]..."
+              gh release delete "${EXISTING_TAG}" --yes --repo "${{ github.repository }}" 2>/dev/null || true
+              
+              # 如果旧 Tag 是历史日期格式，顺便清理远程 Git Tag，保持仓库极度纯净
+              if [ "${EXISTING_TAG}" != "${TARGET_TAG}" ]; then
+                git push origin :refs/tags/${EXISTING_TAG} 2>/dev/null || true
+              fi
+            fi
             
-            # 重新创建全新同名 Release
-            gh release create "${RELEASE_TAG}" "${NEW_ZIP}" \
+            echo "🚀 正在创建唯一的标准 Release [${TARGET_TAG}]..."
+            gh release create "${TARGET_TAG}" "${NEW_ZIP}" \
               --title "Sector Klines & Metadata (Latest)" \
               --notes "自愈接力系统全量归档。更新时间: ${DATE_TAG} (UTC)。请在 Actions 页面查看本次提取的数据质量质检报告 (QA Summary)。"
               
-            echo "🎉 Release [${RELEASE_TAG}] 更新覆盖完毕。"
+            echo "🎉 Release [${TARGET_TAG}] 更新覆盖完毕，目前 Releases 列表中仅保留此最新版本。"
           else
             echo "⏭️ 已跳过 Release 资产覆盖步骤，维持原有历史数据。"
           fi
