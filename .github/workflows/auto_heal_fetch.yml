@@ -66,19 +66,22 @@ jobs:
     needs: dispatcher
     runs-on: ubuntu-latest
     if: needs.dispatcher.outputs.matrix != '[]'
+    # 使用 Playwright 官方 Python 容器环境，解决系统级依赖下载慢的问题
+    container:
+      image: mcr.microsoft.com/playwright/python:v1.42.0-jammy
     strategy:
       matrix:
         chunk_id: ${{ fromJson(needs.dispatcher.outputs.matrix) }}
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-          cache: 'pip'
-      - run: |
+      
+      # 容器已自带 Python 环境，直接安装依赖包
+      - name: Install dependencies
+        run: |
           pip install -r requirements.txt
-          python -m playwright install chromium --with-deps
+          # 容器内已内置 Chromium 运行环境，此处无需添加 --with-deps，仅做版本匹配校验
+          python -m playwright install chromium
           
       - name: Download Chunks
         uses: actions/download-artifact@v4
