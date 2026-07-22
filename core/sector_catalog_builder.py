@@ -6,7 +6,6 @@ import os
 import json
 from collections import Counter
 from datetime import datetime, timedelta
-import baostock as bs
 import requests
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
@@ -19,8 +18,9 @@ EM_SEED_API = "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=6000&po=1&np
 # 板块详情接口 (仅作最后分类抢救兜底)
 BASEINFO_API = "https://quote.eastmoney.com/newapi/baseinfo/90.{code}"
 
-UNIVERSE_WORKERS = 80
-BASEINFO_WORKERS = 80
+# 降低并发数至 25，防止 GitHub Actions 环境下高并发请求触发东财网关 Connection Reset
+UNIVERSE_WORKERS = 25
+BASEINFO_WORKERS = 25
 
 # 官方分类映射表
 BASEINFO_TYPE_MAP = {
@@ -31,8 +31,8 @@ BASEINFO_TYPE_MAP = {
 
 def create_session() -> requests.Session:
     session = requests.Session()
-    # 扩大连接池，恢复底层的 TCP/TLS 通道高效复用
-    adapter = HTTPAdapter(pool_connections=150, pool_maxsize=150, max_retries=1)
+    # 建立 TCP/TLS 通道复用
+    adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=2)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     session.headers.update({
@@ -53,27 +53,26 @@ def get_json(session: requests.Session, url: str, params=None, timeout=15, retri
             time.sleep(1)
     return None
 
-def get_stock_seeds_from_baostock():
-    """获取全量个股种子列表"""
-    try:
-        bs.login()
-        # 探测最近的交易日
-        for i in range(15):
-            target_date = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
-            rs = bs.query_all_stock(day=target_date)
+def get_stock_seeds_from_tdx():
+    """从 Go TDX 导出的 stock_list.json 读取全量股票种子列表"""
+    if os.path.exists("stock_list.json"):
+        try:
+            with open("stock_list.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
             stocks = []
-            if rs.error_code == '0':
-                while rs.next():
-                    row = rs.get_row_data()
-                    code, name = row[0], row[2] if len(row) > 2 else ""
-                    if code.startswith(("sh.", "sz.", "bj.")) and name:
-                        stocks.append((code, name.strip()))
-                if stocks:
-                    return stocks
-    except: pass
-    finally:
-        try: bs.logout()
-        except: pass
+            for item in data:
+                code = item.get("code") or item.get("Code", "")
+                name = item.get("code_name") or item.get("CodeName", "")
+                if not code:
+                    continue
+                prefix = code[:2].lower()
+                pure_num = code[2:]
+                stocks.append((f"{prefix}.{pure_num}", name.strip()))
+            if stocks:
+                print(f"✅ [Catalog Builder] 成功从 TDX (stock_list.json) 载入 {len(stocks)} 只股票种子。")
+                return stocks
+        except Exception as e:
+            print(f"⚠️ [Catalog Builder] 读取 stock_list.json 失败: {e}")
     return []
 
 def get_stock_seeds_from_eastmoney(session: requests.Session):
@@ -107,19 +106,18 @@ def fetch_stock_sector_relations(session: requests.Session, stock_info):
 def build_sector_universe():
     """核心第一步：自下而上反推板块全集，并拦截成分映射"""
     session = create_session()
-    stocks = get_stock_seeds_from_baostock() or get_stock_seeds_from_eastmoney(session)
+    # 优先从 Go TDX 种子获取，若无则自动降级使用东财种子 API
+    stocks = get_stock_seeds_from_tdx() or get_stock_seeds_from_eastmoney(session)
     if not stocks: raise RuntimeError("无法获取任何个股种子")
 
     sector_map = {}
-    components_mapping = []  # [新增] 拦截成分股映射数据
+    components_mapping = []  # 拦截成分股映射数据
     
-    # 显式控制线程池生命周期，40个并发安全拉取
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=UNIVERSE_WORKERS)
     try:
         futures = {executor.submit(fetch_stock_sector_relations, session, s): s for s in stocks}
         
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="动态反推板块大名单"):
-            # [新增] 获取这只股票的初始信息
             stock_info = futures[future]
             bs_code, stock_name = stock_info
             # 将 sh.600000 转换为量化标准格式 SH600000
@@ -127,18 +125,18 @@ def build_sector_universe():
             
             try:
                 relations = future.result()
+                if not relations: continue
                 for rel in relations:
                     code = rel["sector_code"]
                     if code not in sector_map:
                         sector_map[code] = {"code": code, "name": rel["sector_name"]}
                         
-                    # [新增] 顺手牵羊：记录成分股对应关系
                     components_mapping.append({
                         "sector_id": f"90.{code}",  # 保证与 K 线的 sid 格式一致
                         "stock_id": std_stock_code,
                         "stock_name": stock_name
                     })
-            except: pass
+            except Exception: pass
 
     except Exception as e:
         print(f"[-] 扫描中断: {e}")
@@ -149,7 +147,7 @@ def build_sector_universe():
         gc.collect() 
         executor.shutdown(wait=False)
 
-    return sector_map, components_mapping  # [修改] 同时返回反推名单和映射大表
+    return sector_map, components_mapping
 
 def fetch_single_dimension(session: requests.Session, fs_code, fid, po):
     """【官方方案二直连版】单维度前100名探测"""
@@ -159,7 +157,7 @@ def fetch_single_dimension(session: requests.Session, fs_code, fid, po):
         "ut": "bd1d9ddb04089700cf9c27f6f7426281",
         "fltt": 2, "invt": 2, "fid": fid,
         "fs": fs_code, "fields": "f12,f13,f14",
-        "_cb": f"jQuery_{int(time.time() * 1000)}" # 穿透网关缓存
+        "_cb": f"jQuery_{int(time.time() * 1000)}"
     }
     
     for attempt in range(2):
@@ -186,7 +184,6 @@ def scan_category_types(session: requests.Session, fs_code, label):
     ]
     tasks = [(fid, po) for fid in fids for po in [1, 0]]
 
-    # 15个线程并发扫盘，防封且高效
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
         futures = {executor.submit(fetch_single_dimension, session, fs_code, fid, po): (fid, po) for fid, po in tasks}
         
@@ -211,7 +208,7 @@ def scan_category_types(session: requests.Session, fs_code, label):
 
 def fetch_baseinfo_type(session: requests.Session, code: str):
     """【官方方案二直连版】最后的详情页分类信息抢救"""
-    params = {"_": int(time.time() * 1000)}  # 时间戳去缓存
+    params = {"_": int(time.time() * 1000)}
     data = get_json(session, BASEINFO_API.format(code=code), params=params)
     if not data: return None
     for key in ("Type111", "JYS", "Type182"):
@@ -220,11 +217,11 @@ def fetch_baseinfo_type(session: requests.Session, code: str):
     return None
 
 def build_sector_catalog():
-    """采用代码库 1 的原装方案二构建完整板块目录"""
-    # 1. 自下而上反推基础大名单 (确保不漏)
-    universe_map, components_mapping = build_sector_universe() # [修改] 接收映射表
+    """方案二构建完整板块目录"""
+    # 1. 自下而上反推基础大名单
+    universe_map, components_mapping = build_sector_universe()
     
-    # 2. 官方三维度大目录扫描 (确保分类)
+    # 2. 官方三维度大目录扫描
     targets = {"Industry": "m:90 t:2", "Concept": "m:90 t:3", "Region": "m:90 t:1"}
     typed_map = {}
     
@@ -235,7 +232,7 @@ def build_sector_catalog():
     except Exception as e:
         print(f"[-] 官方目录扫描受阻: {e}")
 
-    # 3. 针对未分配类型的零散边缘板块，启动详情页详情数据抢救 (确保 100% 完整官方分类)
+    # 3. 针对未分配类型的零散板块，启动详情页数据抢救
     missing_codes = [c for c in universe_map if c not in typed_map]
     if missing_codes:
         print(f"[*] 仍有 {len(missing_codes)} 个板块官方分类未就绪，启动 baseinfo 详情页抢救...")
@@ -262,7 +259,7 @@ def build_sector_catalog():
     concepts = []
     
     for code, info in universe_map.items():
-        t = typed_map.get(code, {}).get("type", "Unknown") # 兜底未知
+        t = typed_map.get(code, {}).get("type", "Unknown")
         sector_obj = {
             "sid": f"90.{code}",
             "name": info["name"],
@@ -270,12 +267,11 @@ def build_sector_catalog():
         }
         all_sectors.append(sector_obj)
         
-        # [新增] 分类归档
         if t == "Region": regions.append(sector_obj)
         elif t == "Industry": industries.append(sector_obj)
         elif t == "Concept": concepts.append(sector_obj)
     
-    # [新增] ==== 元数据落盘逻辑 ====
+    # ==== 元数据落盘逻辑 ====
     os.makedirs("metadata", exist_ok=True)
     with open("metadata/components.json", "w", encoding="utf-8") as f:
         json.dump(components_mapping, f, ensure_ascii=False)
@@ -287,7 +283,6 @@ def build_sector_catalog():
         json.dump(concepts, f, ensure_ascii=False)
         
     print(f"📦 [Metadata] 已成功截获并保存 {len(components_mapping)} 条成分股映射及三大分类名单。")
-    # ==============================
     
     counts = Counter(x["type"] for x in all_sectors)
     print(f"[+] 动态分类目录同步完毕 | 板块总数: {len(all_sectors)} | 分类统计: {dict(counts)}")
