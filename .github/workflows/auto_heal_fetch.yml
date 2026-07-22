@@ -42,6 +42,9 @@ jobs:
       - name: Fetch Stock Seeds via TDX (Attempt 1 Only)
         if: ${{ github.event.inputs.attempt == '1' || github.event.inputs.attempt == '' }}
         run: |
+          go mod init tdx_seed || true
+          go get github.com/injoyai/tdx@master
+          go mod tidy
           go run tools/fetch_seeds.go
       
       - name: Download Pending List
