@@ -19,8 +19,8 @@ EM_SEED_API = "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=6000&po=1&np
 BASEINFO_API = "https://quote.eastmoney.com/newapi/baseinfo/90.{code}"
 
 # 降低并发数至 25，防止 GitHub Actions 环境下高并发请求触发东财网关 Connection Reset
-UNIVERSE_WORKERS = 25
-BASEINFO_WORKERS = 25
+UNIVERSE_WORKERS = 80
+BASEINFO_WORKERS = 80
 
 # 官方分类映射表
 BASEINFO_TYPE_MAP = {
