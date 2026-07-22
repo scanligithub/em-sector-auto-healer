@@ -26,10 +26,23 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      
+      - name: Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Setup Python Environment
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
+      
       - run: pip install -r requirements.txt
+
+      - name: Fetch Stock Seeds via TDX (Attempt 1 Only)
+        if: ${{ github.event.inputs.attempt == '1' || github.event.inputs.attempt == '' }}
+        run: |
+          go run tools/fetch_seeds.go
       
       - name: Download Pending List
         if: ${{ github.event.inputs.attempt != '1' && github.event.inputs.attempt != '' }}
@@ -66,7 +79,6 @@ jobs:
     needs: dispatcher
     runs-on: ubuntu-latest
     if: needs.dispatcher.outputs.matrix != '[]'
-    # 使用 Playwright 官方 Python 容器环境，解决系统级依赖下载慢的问题
     container:
       image: mcr.microsoft.com/playwright/python:v1.42.0-jammy
     strategy:
@@ -76,11 +88,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      # 容器已自带 Python 环境，直接安装依赖包
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          # 容器内已内置 Chromium 运行环境，此处无需添加 --with-deps，仅做版本匹配校验
           python -m playwright install chromium
           
       - name: Download Chunks
@@ -220,7 +230,7 @@ jobs:
           
           NEW_ZIP="Full_Sector_Klines.zip"
           OLD_ZIP="Old_Full_Sector_Klines.zip"
-          TARGET_TAG="latest" # 我们未来统一使用的固定唯一 Tag 名
+          TARGET_TAG="latest"
           SHOULD_RELEASE=true
           
           # 2. 动态探测仓库中当前标有 "Latest" 状态的真实 Release Tag 名
@@ -257,12 +267,10 @@ jobs:
           if [ "$SHOULD_RELEASE" = true ]; then
             DATE_TAG=$(date +'%Y-%m-%d %H:%M:%S')
             
-            # 🧹 如果检测到旧 Release（不论是日期 Tag 还是 "latest"），将其彻底清理
             if [ -n "${EXISTING_TAG}" ]; then
               echo "🧹 清理旧的 Release [${EXISTING_TAG}]..."
               gh release delete "${EXISTING_TAG}" --yes --repo "${{ github.repository }}" 2>/dev/null || true
               
-              # 如果旧 Tag 是历史日期格式，顺便清理远程 Git Tag，保持仓库极度纯净
               if [ "${EXISTING_TAG}" != "${TARGET_TAG}" ]; then
                 git push origin :refs/tags/${EXISTING_TAG} 2>/dev/null || true
               fi
