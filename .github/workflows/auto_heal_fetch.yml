@@ -159,7 +159,7 @@ jobs:
           NEW_CHAIN="${CHAIN_IDS},${{ github.run_id }}"
           NEW_CHAIN=$(echo $NEW_CHAIN | sed 's/^,//')
           
-          if [ "$REMAINING" -gt "0" ] && [ "$CURRENT_ATTEMPT" -lt "10" ]; then
+          if [ "$REMAINING" -gt "0" ] && [ "$CURRENT_ATTEMPT" -lt "15" ]; then
             echo "💥 存在未下载完的数据，触发接力!"
             echo "status=CONTINUE" >> $GITHUB_OUTPUT
             gh workflow run auto_heal_fetch.yml \
